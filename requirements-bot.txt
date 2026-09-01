@@ -1,0 +1,4 @@
+# Standalone Discord bot (discord_bot.py) — run anywhere Python 3.9+ runs.
+# The Streamlit app does NOT need these.
+discord.py>=2.3.0
+supabase>=1.0.3

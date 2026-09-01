@@ -1,0 +1,59 @@
+# MIOS V6 — deployment requirements.
+#
+# ── the deployment target ──
+# Streamlit Cloud runs **Python 3.14.6** (from the build log, Manage app). That
+# is the only environment these versions have to satisfy, and it is not the
+# environment the test suite runs in — the sandbox is Python 3.11.
+#
+# ── why every line is capped ──
+# Thirteen bare `>=` meant Cloud re-resolved the whole tree on every rebuild
+# and could cross a major version with nothing asking. Streamlit serves
+# hash-named JS chunks, so a rebuild onto a different version renames them and
+# a browser still holding the previous index.html requests files that are gone:
+#
+#     TypeError: Failed to fetch dynamically imported module:
+#     https://…streamlit.app/~/+/static/js/
+#
+# ── ⚠️ the outage this file caused, and the rule that came out of it ──
+# An earlier version of this file capped `streamlit-autorefresh~=0.1.6`, i.e.
+# `>=0.1.6,<0.2.0`. That package has released exactly three versions — 0.0.1,
+# 1.0.0 and 1.0.1 — so **0.1.6 has never existed**. The original `>=0.1.6` had
+# always been resolving to 1.0.1; the cap turned it into a range containing no
+# release at all, and the deploy died with "Error installing requirements"
+# before pip ever evaluated anything else.
+#
+#     A cap is only safe if some published release still falls inside it.
+#
+# `pip install --dry-run -r requirements.txt` is the check that catches this.
+# Run it before merging a change to this file. Nothing in the test suite can:
+# it needs the network.
+
+# ── the front end · exact ────────────────────────────────────────────────
+# Its version IS the served JS asset, so a minor bump renames the chunks and
+# `~=` would not close the hole. 1.60.0 is both the version the test suite
+# runs against and a version the Cloud build log shows pip fetching cleanly on
+# Python 3.14.6 — so tested and deployed are the same program.
+#
+# To raise it: change this line AND KNOWN_GOOD_FLOORS in
+# mios_v5/tests/test_requirements.py, then re-run the dry run.
+streamlit==1.60.0
+
+# ── ⚠️ floor raised deliberately: the old one named a version that never
+#    existed. Do not lower it back to 0.1.6.
+streamlit-autorefresh>=1.0.0,<2.0.0
+
+# ── everything else: original floor, upper cap only ─────────────────────
+# No floor is raised, so every version the pre-outage file could resolve, this
+# file can still resolve. On Python 3.14 pip will pick recent releases anyway;
+# the low floors cost nothing and keep the file honest about what was verified.
+requests>=2.31.0,<3.0.0
+pandas>=2.1.0,<4.0.0
+numpy>=1.24.0,<3.0.0
+scipy>=1.11.0,<2.0.0
+plotly>=5.17.0,<7.0.0
+pytz>=2023.3,<2027.0
+supabase>=1.0.3,<3.0.0
+yfinance>=0.2.28,<1.0.0
+google-genai>=1.0.0,<2.0.0
+websockets>=12.0,<18.0.0
+anthropic>=0.40.0,<1.0.0

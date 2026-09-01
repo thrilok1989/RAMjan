@@ -1,0 +1,1466 @@
+{
+  "tally": {
+    "CRITICAL": 7,
+    "PRODUCER": 19,
+    "DRAW-ONLY": 127
+  },
+  "panels": [
+    {
+      "panel": "_opportunity",
+      "verdict": "CRITICAL",
+      "protected": [
+        "_premium_energy"
+      ],
+      "writes": [
+        "_opportunity_matrix",
+        "_opportunity_prev",
+        "_premium_energy",
+        "_premium_energy_prev"
+      ],
+      "read_by_others": [
+        "_opportunity_matrix",
+        "_premium_energy"
+      ]
+    },
+    {
+      "panel": "_render_main_analyzer",
+      "verdict": "CRITICAL",
+      "protected": [
+        "_cached_option_data",
+        "_dispatch_decision",
+        "_entry_decision",
+        "_last_df",
+        "_leg_profiles",
+        "_lifecycle_decision",
+        "_mios_state",
+        "_mios_transport",
+        "_money_flow_data",
+        "_premium_energy",
+        "_premium_structures",
+        "_reaction_sr",
+        "_simple_entry_on",
+        "_sr_levels",
+        "_trading_context"
+      ],
+      "writes": [
+        "_alert_bot_last_error",
+        "_alert_counts_ts",
+        "_alert_side_counts",
+        "_alert_side_events",
+        "_all_bias_rows",
+        "_atm_leg_api",
+        "_atm_pm1_vpfr",
+        "_cached_option_data",
+        "_cached_raw_chain",
+        "_cached_raw_chain_latest",
+        "_candle_write_stats",
+        "_cockpit_ctx"
+      ],
+      "read_by_others": [
+        "_alert_counts_ts",
+        "_alert_side_counts",
+        "_alert_side_events",
+        "_all_bias_rows",
+        "_atm_leg_api",
+        "_atm_pm1_vpfr",
+        "_cached_option_data",
+        "_cached_raw_chain",
+        "_cached_raw_chain_latest",
+        "_candle_write_stats",
+        "_cockpit_ctx",
+        "_cockpit_wing_cache"
+      ]
+    },
+    {
+      "panel": "_sr_intelligence",
+      "verdict": "CRITICAL",
+      "protected": [
+        "_sr_levels"
+      ],
+      "writes": [
+        "_sr_levels"
+      ],
+      "read_by_others": [
+        "_sr_levels"
+      ]
+    },
+    {
+      "panel": "_strike_validation",
+      "verdict": "CRITICAL",
+      "protected": [
+        "_premium_structures",
+        "_trading_context"
+      ],
+      "writes": [
+        "_premium_behaviour",
+        "_premium_structures",
+        "_selected_strikes",
+        "_strike_validation",
+        "_trading_context"
+      ],
+      "read_by_others": [
+        "_premium_structures",
+        "_selected_strikes",
+        "_trading_context"
+      ]
+    },
+    {
+      "panel": "_terminal_chart",
+      "verdict": "CRITICAL",
+      "protected": [
+        "_leg_profiles"
+      ],
+      "writes": [
+        "_leg_profiles",
+        "_panel_profiles"
+      ],
+      "read_by_others": [
+        "_leg_profiles",
+        "_panel_profiles"
+      ]
+    },
+    {
+      "panel": "_trading_screen",
+      "verdict": "CRITICAL",
+      "protected": [
+        "_dispatch_decision",
+        "_entry_decision",
+        "_leg_profiles",
+        "_lifecycle_decision",
+        "_premium_energy",
+        "_premium_structures",
+        "_sr_levels",
+        "_trading_context"
+      ],
+      "writes": [
+        "_dispatch_decision",
+        "_dispatch_registry",
+        "_entry_decision",
+        "_last_valid_signal",
+        "_leg_profiles",
+        "_lifecycle_decision",
+        "_opportunity_matrix",
+        "_opportunity_prev",
+        "_panel_profiles",
+        "_premium_behaviour",
+        "_premium_energy",
+        "_premium_energy_prev"
+      ],
+      "read_by_others": [
+        "_dispatch_decision",
+        "_dispatch_registry",
+        "_entry_decision",
+        "_last_valid_signal",
+        "_lifecycle_decision",
+        "_opportunity_matrix",
+        "_opportunity_prev",
+        "_panel_profiles",
+        "_premium_energy",
+        "_premium_energy_prev",
+        "_premium_structures",
+        "_selected_strikes"
+      ]
+    },
+    {
+      "panel": "render_dashboard_v6",
+      "verdict": "CRITICAL",
+      "protected": [
+        "_dispatch_decision",
+        "_entry_decision",
+        "_leg_profiles",
+        "_lifecycle_decision",
+        "_premium_energy",
+        "_premium_structures",
+        "_sr_levels",
+        "_trading_context"
+      ],
+      "writes": [
+        "_dispatch_decision",
+        "_dispatch_registry",
+        "_entry_decision",
+        "_last_valid_signal",
+        "_leg_profiles",
+        "_lifecycle_decision",
+        "_opportunity_matrix",
+        "_opportunity_prev",
+        "_panel_profiles",
+        "_premium_behaviour",
+        "_premium_energy",
+        "_premium_energy_prev"
+      ],
+      "read_by_others": [
+        "_dispatch_decision",
+        "_dispatch_registry",
+        "_entry_decision",
+        "_last_valid_signal",
+        "_leg_profiles",
+        "_lifecycle_decision",
+        "_opportunity_matrix",
+        "_opportunity_prev",
+        "_panel_profiles",
+        "_premium_energy",
+        "_premium_energy_prev",
+        "_premium_structures"
+      ]
+    },
+    {
+      "panel": "_dhan_post",
+      "verdict": "PRODUCER",
+      "protected": [],
+      "writes": [
+        "_dhan_429_until",
+        "_dhan_last_error",
+        "_dhan_token_expired",
+        "_token_bad"
+      ],
+      "read_by_others": [
+        "_dhan_429_until",
+        "_dhan_last_error",
+        "_dhan_token_expired"
+      ]
+    },
+    {
+      "panel": "_handle_response",
+      "verdict": "PRODUCER",
+      "protected": [],
+      "writes": [
+        "_dhan_429_notified",
+        "_dhan_429_until",
+        "_dhan_token_expired"
+      ],
+      "read_by_others": [
+        "_dhan_429_until",
+        "_dhan_token_expired"
+      ]
+    },
+    {
+      "panel": "_history",
+      "verdict": "PRODUCER",
+      "protected": [],
+      "writes": [
+        "_v6_replay_day",
+        "_v6_replay_signal"
+      ],
+      "read_by_others": [
+        "_v6_replay_signal"
+      ]
+    },
+    {
+      "panel": "_render_retention_panel",
+      "verdict": "PRODUCER",
+      "protected": [],
+      "writes": [
+        "_retention_preview",
+        "trade_logs"
+      ],
+      "read_by_others": [
+        "trade_logs"
+      ]
+    },
+    {
+      "panel": "analyze_option_chain",
+      "verdict": "PRODUCER",
+      "protected": [],
+      "writes": [
+        "_cached_raw_chain",
+        "_cached_raw_chain_latest",
+        "_dhan_429_until",
+        "_dhan_last_error",
+        "_dhan_token_expired",
+        "_expiry_stale",
+        "_token_bad"
+      ],
+      "read_by_others": [
+        "_cached_raw_chain",
+        "_cached_raw_chain_latest",
+        "_dhan_429_until",
+        "_dhan_last_error",
+        "_dhan_token_expired",
+        "_expiry_stale"
+      ]
+    },
+    {
+      "panel": "capture_stage2_market_events",
+      "verdict": "PRODUCER",
+      "protected": [],
+      "writes": [
+        "_discord_relay_seen",
+        "_stage2_cvd_hist",
+        "_stage2_evt_sig",
+        "_story_db_error",
+        "_story_events_processed",
+        "_story_results"
+      ],
+      "read_by_others": [
+        "_discord_relay_seen",
+        "_stage2_evt_sig",
+        "_story_events_processed",
+        "_story_results"
+      ]
+    },
+    {
+      "panel": "compute_market_structure",
+      "verdict": "PRODUCER",
+      "protected": [],
+      "writes": [
+        "_cockpit_wing_cache",
+        "_dhan_429_notified",
+        "_dhan_429_until",
+        "_dhan_last_intraday_ts",
+        "_dhan_token_expired",
+        "_fmr_cache",
+        "_full_market_read",
+        "_market_structure",
+        "_ms_cache",
+        "_strike_mode_hist"
+      ],
+      "read_by_others": [
+        "_cockpit_wing_cache",
+        "_dhan_429_notified",
+        "_dhan_429_until",
+        "_dhan_last_intraday_ts",
+        "_dhan_token_expired",
+        "_fmr_cache",
+        "_full_market_read",
+        "_strike_mode_hist"
+      ]
+    },
+    {
+      "panel": "compute_per_candle_pxoi",
+      "verdict": "PRODUCER",
+      "protected": [],
+      "writes": [
+        "_nifty_fut_err",
+        "_pxoi_cache"
+      ],
+      "read_by_others": [
+        "_nifty_fut_err",
+        "_pxoi_cache"
+      ]
+    },
+    {
+      "panel": "get_intraday_data",
+      "verdict": "PRODUCER",
+      "protected": [],
+      "writes": [
+        "_dhan_429_notified",
+        "_dhan_429_until",
+        "_dhan_last_intraday_ts",
+        "_dhan_token_expired"
+      ],
+      "read_by_others": [
+        "_dhan_429_notified",
+        "_dhan_429_until",
+        "_dhan_token_expired"
+      ]
+    },
+    {
+      "panel": "get_quote",
+      "verdict": "PRODUCER",
+      "protected": [],
+      "writes": [
+        "_dhan_token_expired",
+        "_nifty_fut_err"
+      ],
+      "read_by_others": [
+        "_dhan_token_expired"
+      ]
+    },
+    {
+      "panel": "render_all_bias_dashboard",
+      "verdict": "PRODUCER",
+      "protected": [],
+      "writes": [
+        "_alert_bot_last_error",
+        "_alert_counts_ts",
+        "_alert_side_counts",
+        "_alert_side_events",
+        "_all_bias_rows",
+        "_cockpit_wing_cache",
+        "_cross_expiry_cache",
+        "_dashboard_verdicts",
+        "_dhan_429_notified",
+        "_dhan_429_until",
+        "_dhan_last_error",
+        "_dhan_last_intraday_ts"
+      ],
+      "read_by_others": [
+        "_alert_counts_ts",
+        "_alert_side_counts",
+        "_alert_side_events",
+        "_all_bias_rows",
+        "_cockpit_wing_cache",
+        "_cross_expiry_cache",
+        "_dashboard_verdicts",
+        "_dhan_429_notified",
+        "_dhan_429_until",
+        "_dhan_last_error",
+        "_dhan_last_intraday_ts",
+        "_dhan_token_expired"
+      ]
+    },
+    {
+      "panel": "render_atm_cvd_graphs",
+      "verdict": "PRODUCER",
+      "protected": [],
+      "writes": [
+        "_cvd_hist_cache",
+        "_dhan_429_notified",
+        "_dhan_429_until",
+        "_dhan_last_intraday_ts",
+        "_dhan_token_expired",
+        "_leg_flow_snap_ts",
+        "_zone_cvd_hist"
+      ],
+      "read_by_others": [
+        "_dhan_429_notified",
+        "_dhan_429_until",
+        "_dhan_last_intraday_ts",
+        "_dhan_token_expired",
+        "_zone_cvd_hist"
+      ]
+    },
+    {
+      "panel": "render_cross_expiry_panel",
+      "verdict": "PRODUCER",
+      "protected": [],
+      "writes": [
+        "_cross_expiry_cache",
+        "_dhan_429_until",
+        "_dhan_last_error",
+        "_dhan_token_expired",
+        "_expiry_stale",
+        "_token_bad"
+      ],
+      "read_by_others": [
+        "_cross_expiry_cache",
+        "_dhan_429_until",
+        "_dhan_last_error",
+        "_dhan_token_expired",
+        "_expiry_stale"
+      ]
+    },
+    {
+      "panel": "render_full_market_read",
+      "verdict": "PRODUCER",
+      "protected": [],
+      "writes": [
+        "_cockpit_wing_cache",
+        "_dhan_429_notified",
+        "_dhan_429_until",
+        "_dhan_last_intraday_ts",
+        "_dhan_token_expired",
+        "_fmr_cache",
+        "_full_market_read",
+        "_strike_mode_hist"
+      ],
+      "read_by_others": [
+        "_cockpit_wing_cache",
+        "_dhan_429_notified",
+        "_dhan_429_until",
+        "_dhan_last_intraday_ts",
+        "_dhan_token_expired",
+        "_fmr_cache",
+        "_full_market_read",
+        "_strike_mode_hist"
+      ]
+    },
+    {
+      "panel": "render_greek_absorption",
+      "verdict": "PRODUCER",
+      "protected": [],
+      "writes": [
+        "_greek_absorb_last",
+        "_greek_absorb_prev"
+      ],
+      "read_by_others": [
+        "_greek_absorb_last",
+        "_greek_absorb_prev"
+      ]
+    },
+    {
+      "panel": "render_market_picture",
+      "verdict": "PRODUCER",
+      "protected": [],
+      "writes": [
+        "_alert_counts_ts",
+        "_alert_side_counts",
+        "_alert_side_events",
+        "_discord_last_error",
+        "_discord_last_ok_ts",
+        "_discord_last_send_ts",
+        "_entry_gate_active",
+        "_entry_gate_armed_sig",
+        "_entry_gate_last_exit",
+        "_entry_gate_last_result",
+        "_entry_gate_last_sig",
+        "_gate_armed"
+      ],
+      "read_by_others": [
+        "_alert_side_counts",
+        "_alert_side_events",
+        "_discord_last_send_ts",
+        "_entry_gate_active",
+        "_gate_armed",
+        "_guard_state",
+        "_layer_scores",
+        "_market_picture",
+        "_news_bias",
+        "_news_last_fetch",
+        "_panel_fetch_errors",
+        "_tg_throttle"
+      ]
+    },
+    {
+      "panel": "render_strike_mode_dashboard",
+      "verdict": "PRODUCER",
+      "protected": [],
+      "writes": [
+        "_cockpit_wing_cache",
+        "_dhan_429_notified",
+        "_dhan_429_until",
+        "_dhan_last_intraday_ts",
+        "_dhan_token_expired",
+        "_fmr_cache",
+        "_full_market_read",
+        "_strike_mode_hist"
+      ],
+      "read_by_others": [
+        "_cockpit_wing_cache",
+        "_dhan_429_notified",
+        "_dhan_429_until",
+        "_dhan_last_intraday_ts",
+        "_dhan_token_expired",
+        "_fmr_cache",
+        "_full_market_read",
+        "_strike_mode_hist"
+      ]
+    },
+    {
+      "panel": "run",
+      "verdict": "PRODUCER",
+      "protected": [],
+      "writes": [
+        "trade_logs"
+      ],
+      "read_by_others": [
+        "trade_logs"
+      ]
+    },
+    {
+      "panel": "send_telegram_message_sync",
+      "verdict": "PRODUCER",
+      "protected": [],
+      "writes": [
+        "_alert_side_events",
+        "_discord_last_error",
+        "_discord_last_ok_ts",
+        "_discord_last_send_ts"
+      ],
+      "read_by_others": [
+        "_alert_side_events",
+        "_discord_last_send_ts"
+      ]
+    },
+    {
+      "panel": "_acceptance_label",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "_case_context",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "_cell",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "_collect",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "_command_center",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "_daily_summary",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "_decision_center",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "_energy_label",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "_evidence_tally",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "_flip_badge",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "_flow_shift",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "_g_options",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "_health_check",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "_intelligence",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "_learning",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "_leg_votes",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "_performance_by_day_type",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "_performance_by_session",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "_price_map",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "_reasons",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "_reference",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "_render_backfill_control",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "_render_chain_panel",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "_replay",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "_safe_upsert",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "_sections",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "_session_validation",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "_side_html",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "_stability_word",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "_stop_block",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "_structure_html",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "_ticket",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "_top_reasons",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "_wait_reasons",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "_wr_rows",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "_zoom_controls",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "alignment",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "bias_card",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "build",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "build_briefing",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "build_level_intel",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "build_thesis",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "check_abort",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "classify",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "compute",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "compute_major_sr_zones",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [
+        "_zone_prev_classification"
+      ],
+      "read_by_others": []
+    },
+    {
+      "panel": "controller_card",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "count_rows_older_than",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "day_type_detail",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "defended_by",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "derive",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "describe",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "entry_zone",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "evaluate_reaction",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "evaluate_validity",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "explain",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "generate_brief_narrative",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "get_alert_side_counts",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "get_fii_dii_cash",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "get_leg_flow_days",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "history",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "insert_alert_log",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "insert_bias_prediction",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "insert_engine_error",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "insert_engine_state",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "insert_entry_gate_signal",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "insert_leg_flow_snapshot",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "insert_market_event",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "insert_market_story",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "insert_story_validation",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "install",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "leg_read",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "level_html",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "market_block",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "market_quality",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "memory_panel_html",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "oldest_day",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "prove",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "reaction_block_html",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "record",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "render_absorption_panel",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "render_calibration",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "render_clean_card",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [
+        "_mios_explain",
+        "_mios_v6_bias"
+      ],
+      "read_by_others": []
+    },
+    {
+      "panel": "render_cockpit",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "render_collection",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "render_command_center",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "render_dashboard",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "render_decision_panel",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "render_energy_panel",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "render_entry_gate_history",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "render_execution",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "render_family_panel",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "render_health_panel",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "render_htf_panel",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "render_leg_heatmaps",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "render_liquidity",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "render_ltp_panel",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "render_memory_panel",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "render_my_analysis",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "render_opportunity_panel",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "render_positioning_heatmap",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "render_premium_behaviour",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "render_reaction_block",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "render_slim_trade_card",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "render_sr_panel",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "render_state_panel",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "render_status",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "render_story_panel",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "render_strike_validation",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "render_structure_panel",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "render_transition_panel",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "render_validity_panel",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "render_zone_card",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "risk",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "rows",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "scale",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "send_discord_message",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [
+        "_discord_last_error",
+        "_discord_last_ok_ts",
+        "_discord_last_send_ts"
+      ],
+      "read_by_others": []
+    },
+    {
+      "panel": "send_telegram_alert_bot",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [
+        "_alert_bot_last_error"
+      ],
+      "read_by_others": []
+    },
+    {
+      "panel": "session_key",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "simple_signal_message",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "summarise",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "sync_pending",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "trail",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "update_bias_prediction",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "update_entry_gate_signal",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "upsert_my_analysis",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    },
+    {
+      "panel": "zone_card_html",
+      "verdict": "DRAW-ONLY",
+      "protected": [],
+      "writes": [],
+      "read_by_others": []
+    }
+  ]
+}

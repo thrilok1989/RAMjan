@@ -1,0 +1,20 @@
+# Python bytecode. Regenerated on every import, specific to the interpreter
+# version that wrote it, and stale copies get imported in preference to edited
+# source — so it is never worth tracking. Running the test suite creates one of
+# these next to every package in the repo.
+__pycache__/
+*.py[cod]
+
+# pytest / coverage scratch
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# local virtualenvs
+.venv/
+venv/
+
+# Streamlit secrets — Dhan tokens, Supabase keys, Telegram/Discord webhooks.
+# `st.secrets` reads this file and it must never reach the remote.
+.streamlit/secrets.toml

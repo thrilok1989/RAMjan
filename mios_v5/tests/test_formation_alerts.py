@@ -129,7 +129,7 @@ def test_it_runs_after_v6_and_sends_to_telegram_seeding_first():
     assert "_notify_chart_formations" in _calls(_fn("_render_main_analyzer"))
     helper = _fn("_notify_chart_formations")
     calls = _calls(helper)
-    assert "send_telegram_message_sync" in calls      # → Telegram, as asked
+    assert "send_formation_alert" in calls             # → Telegram, as asked
     assert "diff" in calls                             # seed-or-diff rule used
     reads = {n.value for n in ast.walk(helper)
              if isinstance(n, ast.Constant) and isinstance(n.value, str)}
@@ -161,3 +161,46 @@ def test_vob_formation_is_paused_by_default_but_gated_not_removed():
     # both emits still present in source (hvp always, vob gated)
     seg = ast.get_source_segment(_SRC, helper) or ""
     assert "'hvp'" in seg and "'vob'" in seg
+
+
+# ── where the formation note is delivered ──────────────────────────────
+# The owner asked for these on the SECOND Telegram account. `vob_minimal`
+# imports streamlit at module scope, so the router is lifted out by source and
+# run against stubs — behaviour, not just shape.
+
+def _router(alert_configured=True):
+    """`send_formation_alert` with its sends stubbed. Returns (fn, log)."""
+    src = ast.get_source_segment(_SRC, _fn("send_formation_alert"))
+    log = []
+    ns = {
+        "TELEGRAM_ALERT_BOT_TOKEN": "tok" if alert_configured else "",
+        "TELEGRAM_ALERT_CHAT_ID": "chat" if alert_configured else "",
+        "send_telegram_alert_bot": lambda m: log.append(("alert_bot", m)),
+        "send_discord_message": lambda m, force=False: log.append(("discord", m)),
+        "send_telegram_message_sync": lambda m, force=False: log.append(("main_bot", m)),
+    }
+    exec(compile(src, "<router>", "exec"), ns)
+    return ns["send_formation_alert"], log
+
+
+def test_the_formation_note_goes_to_the_alert_bot_not_the_main_one():
+    fn, log = _router()
+    fn("📐 new HVP")
+    assert ("alert_bot", "📐 new HVP") in log
+    assert not any(where == "main_bot" for where, _ in log)
+
+
+def test_discord_still_gets_its_copy_exactly_once():
+    """Only the Telegram destination moved — the Discord mirror is unchanged,
+    and must not double up now that two senders could each post it."""
+    fn, log = _router()
+    fn("📐 new HVP")
+    assert [w for w, _ in log].count("discord") == 1
+
+
+def test_an_unconfigured_alert_bot_falls_back_instead_of_dropping():
+    """A note the owner asked for must not vanish because a secret is missing.
+    The main-bot path posts to Discord itself, so this must not post twice."""
+    fn, log = _router(alert_configured=False)
+    fn("📐 new HVP")
+    assert log == [("main_bot", "📐 new HVP")]

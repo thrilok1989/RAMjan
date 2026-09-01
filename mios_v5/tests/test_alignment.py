@@ -510,3 +510,125 @@ def test_a_missing_leg_premium_does_not_blame_the_pivots():
     row = _by_check(A.build(ss), "PUT HVP HIGH")
     assert "premium" in row["remark"]
     assert "no high-volume pivots" not in row["remark"]
+
+
+# ── 8 · precision and reach, from a live expiry afternoon ────────────────────
+#
+# Both of these shipped rendering plausible-looking rows. The first displayed
+# three different prices as the same number; the second cast a real vote from a
+# level the premium could not reach.
+
+def _expiry_ss(**over):
+    """A near-expiry leg pair: the CALL at ₹5.75, the PUT at 5 paise, and both
+    carrying VOB zones from earlier in the session when they were worth more."""
+    ss = {
+        "_nifty_spot_live": 24055.0,
+        "_market_picture": {"regime": "SIDEWAYS"},
+        "_atm_leg_ltp": {"ATM CE 24050": 5.75, "ATM PE 24050": 0.05},
+        "_atm_leg_vob_volume": {
+            "ATM CE 24050": [{"zone_type": "bearish", "mid": 84.0,
+                              "status": "INTACT", "dominant": "balanced",
+                              "bull_pct": 50}],
+            "ATM PE 24050": [{"zone_type": "bearish", "mid": 34.0,
+                              "status": "FADING", "dominant": "balanced",
+                              "bull_pct": 58}]},
+        "_leg_profiles": {
+            "CALL": {"hv_points": [{"price": 15.60, "side": "HIGH"},
+                                   {"price": 7.50, "side": "LOW"}]},
+            "PUT": {"hv_points": [{"price": 30.90, "side": "HIGH"},
+                                  {"price": 0.03, "side": "LOW"},
+                                  {"price": 0.04, "side": "LOW"}]},
+            "call_label": "ATM CE 24050", "put_label": "ATM PE 24050"},
+    }
+    ss.update(over)
+    return ss
+
+
+def test_a_premium_keeps_its_paise():
+    """"₹0 · ₹0" was three different prices — a 5-paise leg and its pivots at
+    ₹0.03 and ₹0.04 — all rounded to zero, on the afternoon those are exactly
+    the prices being decided."""
+    row = _by_check(A.build(_expiry_ss()), "PUT HVP LOW")
+    assert row["value"] == "₹0.04 · ₹0.03"
+    assert "₹0.04" in row["position"]
+
+
+def test_an_index_level_keeps_whole_rupees():
+    """The same formatter must not put paise on a 24,000-point index level."""
+    assert _by_check(A.build(_ss()), "NIFTY Support")["value"] == "₹24,350"
+    assert A._rupees(24350.0) == "₹24,350"
+    assert A._rupees(0.05) == "₹0.05"
+    assert A._rupees(84.0) == "₹84.00"
+
+
+def test_both_columns_round_a_price_the_same_way():
+    """The value column said "₹31" while the position column beside it called
+    the same pivot "₹30.90", because two call sites rounded it differently."""
+    row = _by_check(A.build(_expiry_ss()), "PUT HVP HIGH")
+    assert "₹30.90" in row["value"]
+    assert "₹30.90" in row["position"]
+
+
+def test_a_leg_zone_out_of_reach_does_not_vote():
+    """The serious one. `analyze_vob_volume`'s status describes what the flow
+    did INSIDE the zone — it is not a claim that price is interacting with it.
+    A CALL at ₹5.75 carried a zone at ₹84 still marked INTACT, and that voted
+    BEAR into the summary from fifteen times away."""
+    row = _by_check(A.build(_expiry_ss()), "CALL LTP Resistance")
+    assert row["align"] == BB.NEUTRAL, "an unreachable zone must abstain"
+    assert "Far from" in row["position"]
+    assert "not in play" in row["remark"]
+    # the levels are still REPORTED — abstaining is not hiding them
+    assert "₹84.00" in row["value"]
+
+
+def test_a_leg_zone_in_reach_still_votes():
+    """The gate must not silence a zone the premium is actually at."""
+    ss = _expiry_ss(_atm_leg_ltp={"ATM CE 24050": 83.0, "ATM PE 24050": 0.05})
+    row = _by_check(A.build(ss), "CALL LTP Resistance")
+    assert row["align"] == BB.BEAR       # CALL resistance holding = bearish
+    assert "Intact" in row["position"]
+
+
+def test_the_leg_bands_are_shared_by_the_zone_and_pivot_rows():
+    """Two definitions of 'near' would let one row call a level in play while
+    the row beneath it calls the same distance far away."""
+    at, near = A._leg_bands(100.0)
+    assert (at, near) == (0.5, 2.0)
+    # and the floors keep a near-worthless expiry leg from having no band
+    assert A._leg_bands(0.05) == (0.25, 0.5)
+
+
+@pytest.mark.parametrize("price,level,expected_holding", [
+    (100.0, 99.9, None),      # inside the at-band — unsettled, no vote
+    (100.0, 99.0, True),      # near and above
+    (100.0, 101.0, False),    # near and below
+    (100.0, 50.0, None),      # far — abstains
+])
+def test_distance_decides_whether_a_leg_level_votes(price, level, expected_holding):
+    at, near = A._leg_bands(price)
+    assert A._distance_word(price, level, at, near)[2] is expected_holding
+
+
+def test_a_working_engine_that_found_nothing_is_not_called_unpublished():
+    """"not published" is a plumbing claim. `analyze_vob_volume` returning only
+    bearish zones is a real market state — common near expiry, when nothing has
+    built below the premium — and reporting it as a missing producer sends the
+    reader to the store instead of the chart."""
+    row = _by_check(A.build(_expiry_ss()), "CALL LTP Support")
+    assert "found no support zone" in row["remark"]
+    assert "not published" not in row["remark"]
+    # a leg with no zones at all still says so plainly
+    ss = _expiry_ss(_atm_leg_vob_volume={"ATM CE 24050": []})
+    assert "no VOB zones published" in _by_check(
+        A.build(ss), "CALL LTP Support")["remark"]
+
+
+def test_the_energy_row_distinguishes_absent_from_empty():
+    """Two faults needing two different people: the stage never ran, or it ran
+    and scored nothing."""
+    absent = _by_check(A.build(_expiry_ss()), "Premium Energy")
+    assert "has not published" in absent["remark"]
+    empty = _by_check(A.build(_expiry_ss(_premium_energy={"bridge": {}})),
+                      "Premium Energy")
+    assert "no energy score" in empty["remark"]

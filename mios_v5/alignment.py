@@ -171,15 +171,35 @@ def _label(v: Any) -> Optional[str]:
     return str(v) if v else None
 
 
+#: at or above this, a price is an index level and whole rupees are the right
+#: precision; below it, it is an option premium and the paise matter.
+_INDEX_SCALE = 1000.0
+
+
 def _rupees(v: Optional[float]) -> str:
-    return f"₹{v:,.0f}" if v is not None else "—"
+    """A price, at the precision its magnitude deserves.
+
+    ⚠️ One formatter for every column, deliberately. Whole rupees are right for
+    ₹24,050 and destroy a premium: a leg trading at ₹0.05 with its high-volume
+    lines at ₹0.03 and ₹0.04 rendered as "₹0 · ₹0" — three different numbers,
+    all displayed as zero, on an expiry afternoon when those are exactly the
+    prices being decided.
+
+    The mixed case is worse than either. The value column formatted a pivot as
+    `₹31` while the position column beside it called the same pivot `₹30.90`,
+    because the two were rounded by different call sites. Routing both through
+    here is what stops that.
+    """
+    if v is None:
+        return "—"
+    return f"₹{v:,.0f}" if abs(v) >= _INDEX_SCALE else f"₹{v:,.2f}"
 
 
 def _levels_text(prices: Sequence[float], limit: int = 3) -> str:
     """`₹24,350 · ₹24,400 · ₹24,450` — the side-by-side form the checklist asks
     for wherever a row carries several levels at once."""
     got = [p for p in prices if p is not None][:limit]
-    return " · ".join(f"₹{p:,.0f}" for p in got) if got else "—"
+    return " · ".join(_rupees(p) for p in got) if got else "—"
 
 
 # ── the interaction column ───────────────────────────────────────────────────
@@ -566,6 +586,29 @@ def _magnet_row(mp: Mapping[str, Any], ss: Mapping[str, Any],
                 + (" · expiry" if read.get("expiry") else ""))
 
 
+def _leg_bands(ltp: float) -> Tuple[float, float]:
+    """`(at, near)` for a leg, as a fraction of its own premium.
+
+    Index points cannot be reused here: ₹5 is a touch on a ₹300 leg and a
+    different world on a ₹20 one. The floors keep a near-worthless expiry-day
+    leg from having a band of nothing.
+    """
+    return max(ltp * 0.005, 0.25), max(ltp * 0.02, 0.5)
+
+
+def _distance_word(price: float, level: float, at: float,
+                   near: float) -> Tuple[str, str, Optional[bool]]:
+    """`(icon, word, holding)` for a price against a level it may be nowhere
+    near. `holding` is None unless the level is close enough to be in play —
+    which is what keeps an unreachable level from casting a vote."""
+    gap = abs(price - level)
+    if gap <= at:
+        return "🟡", "At", None
+    if gap > near:
+        return "⚪", "Far from", None
+    return ("🟢", "Above", True) if price > level else ("🔴", "Below", False)
+
+
 def _prefer_align(preferred: Optional[str], ce_e: Optional[float],
                   pe_e: Optional[float]) -> str:
     """Stage 71.7's premium preference → a NIFTY direction.
@@ -644,8 +687,15 @@ def _premium(ss: Mapping[str, Any], zones: Sequence[Mapping[str, Any]]) -> List[
             _prefer_align(bias, ce_e, pe_e),
             bias or "which side is carrying the participation"))
     else:
-        rows.append(_na_row(PREMIUM, B_OPTIONS, "Premium Energy",
-                            "Stage 71.7 energy not published"))
+        # Two different faults, and they need different people to look at them:
+        # the stage never ran (its panel is upstream, on the Trading tab), or it
+        # ran and reported no score. One message for both sent me checking the
+        # bridge path twice for what was an absent key.
+        rows.append(_na_row(
+            PREMIUM, B_OPTIONS, "Premium Energy",
+            "Stage 71.7 published no energy score for either side"
+            if pe_energy else
+            "Stage 71.7 has not published — its panel runs on the Trading tab"))
 
     profiles = _map(ss.get("_leg_profiles"))
     vob = _map(ss.get("_atm_leg_vob_volume"))
@@ -701,31 +751,67 @@ def _premium(ss: Mapping[str, Any], zones: Sequence[Mapping[str, Any]]) -> List[
             got = [z for z in (legzones or ())
                    if isinstance(z, Mapping) and z.get("zone_type") == zone_type]
             if not got or ltp is None:
-                rows.append(_na_row(PREMIUM, B_OPTIONS, check,
-                                    "leg VOB zones not published"
-                                    if not got else "no leg LTP published"))
+                # ⚠️ "not published" is a plumbing claim, and it was being made
+                # about a working engine. `analyze_vob_volume` runs per leg and
+                # returns only the zones it finds — a leg with bearish blocks
+                # and no bullish ones is a real market state (common near
+                # expiry, when nothing has built below the premium), not a
+                # missing producer. Saying so sends the reader to the chart
+                # instead of to the store.
+                if ltp is None:
+                    why = "no leg premium published"
+                elif legzones:
+                    why = (f"the engine found no {role} zone on this leg "
+                           f"({len(legzones)} zone(s), none {zone_type})")
+                else:
+                    why = "no VOB zones published for this leg"
+                rows.append(_na_row(PREMIUM, B_OPTIONS, check, why))
                 continue
             mids = [m for m in (_f(z.get("mid")) for z in got) if m is not None]
             nearest = min(got, key=lambda z: abs((_f(z.get("mid")) or 0) - ltp))
+            mid = _f(nearest.get("mid"))
             status = str(nearest.get("status") or "")
-            # BUILDING / INTACT = the zone is doing its job; BREAKING = it
-            # failed; FADING = flow turned against it but it has not gone.
-            holding = (True if status in ("BUILDING", "INTACT") else
-                       False if status == "BREAKING" else None)
-            icon = {"BUILDING": "🟢", "INTACT": "🟢",
-                    "BREAKING": "🔴", "FADING": "🟠"}.get(status, "🟡")
+            _at, _near = _leg_bands(ltp)
+
+            # ⚠️ Distance first, status second — and this ordering is the fix
+            # for a row that was casting real votes on unreachable levels.
+            #
+            # `analyze_vob_volume`'s `status` describes what the flow did INSIDE
+            # the zone; it is not a claim that price is interacting with it now.
+            # On an expiry afternoon a CALL trading at ₹5.75 carried a zone at
+            # ₹84 still marked INTACT — "sellers held the majority in there",
+            # perfectly true, and fifteen times away from any price the leg can
+            # reach. Taken as a live read it voted BEAR into the summary.
+            #
+            # So a zone outside the leg's own near band reports its distance and
+            # abstains, exactly as the index rows and the leg HVP rows already
+            # do. Every other level in this table is gated this way; this one
+            # was not, and it was the only one that could vote from that far
+            # out.
+            if mid is None or abs(mid - ltp) > _near:
+                icon, word, holding = _distance_word(ltp, mid or 0.0, _at, _near)
+                position = f"{icon} {word} {_rupees(mid)}"
+                remark = (f"zone {status.lower() or 'unclassified'}, but "
+                          f"{abs((mid or 0) - ltp):,.2f} away — not in play")
+            else:
+                # BUILDING / INTACT = the zone is doing its job; BREAKING = it
+                # failed; FADING = flow turned against it but it has not gone.
+                holding = (True if status in ("BUILDING", "INTACT") else
+                           False if status == "BREAKING" else None)
+                icon = {"BUILDING": "🟢", "INTACT": "🟢",
+                        "BREAKING": "🔴", "FADING": "🟠"}.get(status, "🟡")
+                position = (f"{icon} {status.title() or 'Unclassified'} "
+                            f"{_rupees(mid)}")
+                remark = (f"{nearest.get('dominant') or '—'} dominant · "
+                          f"{_f(nearest.get('bull_pct')) or 0:.0f}% buy volume")
             rows.append(_row(
                 PREMIUM, B_OPTIONS, check, _levels_text(_by_distance(mids, ltp), 2),
-                f"{icon} {status.title() or 'Unclassified'} "
-                f"{_rupees(_f(nearest.get('mid')))}",
-                _level_align(chart, role, holding),
-                f"{nearest.get('dominant') or '—'} dominant · "
-                f"{_f(nearest.get('bull_pct')) or 0:.0f}% buy volume"))
+                position, _level_align(chart, role, holding), remark))
 
         # The premium itself. Reported, never scored: a price is not a
         # direction, and the leg's S/R rows above are where its behaviour votes.
         rows.append(_row(PREMIUM, B_OPTIONS, f"{chart} LTP Price",
-                         f"₹{ltp:,.2f}" if ltp is not None else "—", "—", INFO,
+                         _rupees(ltp), "—", INFO,
                          f"{name} — current premium" if name else "leg not resolved")
                     if ltp is not None else
                     _na_row(PREMIUM, B_OPTIONS, f"{chart} LTP Price",
@@ -746,25 +832,15 @@ def _premium(ss: Mapping[str, Any], zones: Sequence[Mapping[str, Any]]) -> List[
                     else "no leg premium published — cannot place the lines"))
                 continue
             nearest = _nearest_to(pts, ltp)
-            gap = abs((nearest or 0) - ltp)
-            # Bands are a fraction of the premium, not index points: ₹5 is a
-            # touch on a ₹300 leg and a different world on a ₹20 one.
-            near_band = max(ltp * 0.02, 0.5)
-            at_band = max(ltp * 0.005, 0.25)
-            holding = None if gap <= at_band else (
-                None if gap > near_band else (ltp > (nearest or 0)))
-            word = ("At" if gap <= at_band else
-                    "Far from" if gap > near_band else
-                    "Above" if ltp > (nearest or 0) else "Below")
-            icon = ("🟡" if gap <= at_band else "⚪" if gap > near_band else
-                    "🟢" if ltp > (nearest or 0) else "🔴")
+            _at, _near = _leg_bands(ltp)
+            icon, word, holding = _distance_word(ltp, nearest or 0.0, _at, _near)
             rows.append(_row(
                 PREMIUM, B_OPTIONS, check, _levels_text(_by_distance(pts, ltp), 2),
-                f"{icon} {word} ₹{nearest:,.2f}",
+                f"{icon} {word} {_rupees(nearest)}",
                 # `hvp_bias` owns HIGH→resistance / LOW→support plus the PUT
                 # inversion; the hold/break flip is applied on top of it.
                 _level_align(chart, role, holding),
-                f"LTP ₹{ltp:,.2f} · {len(pts)} line(s)", observed=False))
+                f"LTP {_rupees(ltp)} · {len(pts)} line(s)", observed=False))
     return rows
 
 

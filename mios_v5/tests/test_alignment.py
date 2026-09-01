@@ -266,32 +266,26 @@ def test_a_call_leg_losing_its_support_also_reads_bearish():
 
 
 def test_leg_hvp_bands_scale_with_the_premium():
-    """₹5 is a touch on a ₹300 leg and a different world on a ₹20 one, so the
-    leg bands are a fraction of the premium, not index points."""
-    cheap = A.build(_ss(_atm_leg_ltp={"ATM CE 24400": 20.0, "ATM PE 24400": 110.0},
-                        _leg_profiles=dict(_ss()["_leg_profiles"],
-                                           CALL={"hv_points": [{"price": 25.0,
-                                                                "side": "HIGH"}]})))
-    rich = A.build(_ss(_atm_leg_ltp={"ATM CE 24400": 300.0, "ATM PE 24400": 110.0},
-                       _leg_profiles=dict(_ss()["_leg_profiles"],
-                                          CALL={"hv_points": [{"price": 305.0,
-                                                               "side": "HIGH"}]})))
-    # The same ₹5 gap, read twice: a quarter of the way across a ₹20 leg (out
-    # of play), and 1.7% of a ₹300 one (still in play, so it votes).
-    cheap_row = _by_check(cheap, "CALL HVP HIGH")
-    rich_row = _by_check(rich, "CALL HVP HIGH")
-    assert "Far from" in cheap_row["position"]
-    assert cheap_row["align"] == BB.NEUTRAL
-    assert "Far from" not in rich_row["position"]
-    assert rich_row["align"] != BB.NEUTRAL
+    """The same ₹12 gap is most of a ₹20 leg and a rounding error on a ₹300
+    one, so the bands are a fraction of the premium, not a number of rupees."""
+    def _call_hvp(ltp, pivot):
+        return _by_check(A.build(_ss(
+            _atm_leg_ltp={"ATM CE 24400": ltp, "ATM PE 24400": 110.0},
+            _leg_profiles=dict(_ss()["_leg_profiles"],
+                               CALL={"hv_points": [{"price": pivot,
+                                                    "side": "HIGH"}]}))),
+            "CALL HVP HIGH")
 
-    # And the band really is proportional, not a fixed number of rupees: on the
-    # ₹300 leg a ₹1 gap is inside the "at the line" band that ₹5 sat outside.
-    at_line = A.build(_ss(_atm_leg_ltp={"ATM CE 24400": 300.0, "ATM PE 24400": 110.0},
-                          _leg_profiles=dict(_ss()["_leg_profiles"],
-                                             CALL={"hv_points": [{"price": 301.0,
-                                                                  "side": "HIGH"}]})))
-    assert "At" in _by_check(at_line, "CALL HVP HIGH")["position"]
+    cheap = _call_hvp(20.0, 32.0)      # ₹12 away — 60% of the premium
+    rich = _call_hvp(300.0, 312.0)     # ₹12 away — 4% of the premium
+    assert "Far from" in cheap["position"]
+    assert cheap["align"] == BB.NEUTRAL
+    assert "Far from" not in rich["position"]
+    assert rich["align"] != BB.NEUTRAL
+
+    # And it is proportional at the tight end too: on the ₹300 leg a ₹1 gap is
+    # inside the "at the line" band.
+    assert "At" in _call_hvp(300.0, 301.0)["position"]
 
 
 # ── 5 · it is a view, not an engine ──────────────────────────────────────────
@@ -594,7 +588,7 @@ def test_the_leg_bands_are_shared_by_the_zone_and_pivot_rows():
     """Two definitions of 'near' would let one row call a level in play while
     the row beneath it calls the same distance far away."""
     at, near = A._leg_bands(100.0)
-    assert (at, near) == (0.5, 5.0)
+    assert (at, near) == (0.5, 50.0)
     # and the floors keep a near-worthless expiry leg from having no band
     assert A._leg_bands(0.05) == (0.25, 0.5)
 
@@ -603,7 +597,7 @@ def test_the_leg_bands_are_shared_by_the_zone_and_pivot_rows():
     (100.0, 99.9, (None, None)),        # inside the at-band — unsettled
     (100.0, 99.0, (A.ABOVE, True)),     # near and above
     (100.0, 101.0, (A.ABOVE, False)),   # near and below
-    (100.0, 50.0, (None, None)),        # far — abstains
+    (100.0, 20.0, (None, None)),        # 80% away — abstains
 ])
 def test_distance_reports_which_side_and_whether_it_counts(price, level, expected):
     """The verdict is a side, not a direction — `_holding` turns it into one
@@ -787,3 +781,106 @@ def test_no_row_claims_a_bucket_that_does_not_exist():
     per-group verdict while still counting in the totals."""
     for r in A.build(_ss())["rows"]:
         assert r["bucket"] in A.BUCKETS, f"{r['check']} → {r['bucket']}"
+
+
+# ── 11 · a leg's band is a percentage of a LEVERAGED price ──────────────────
+#
+# Reported: a call at ₹5.75 with its high-volume pivots at ₹7.50 and ₹8.35 read
+# "⚪ Far from ₹7.50". Those are ₹1.75 and ₹2.60 from the premium — thirty and
+# forty-five per cent — which is an ordinary morning for an option and plainly
+# in front of the price.
+
+@pytest.mark.parametrize("ltp,level,expect_in_play,pct", [
+    (5.75, 7.50, True, 30),         # the reported case
+    (5.75, 8.35, True, 45),
+    (5.75, 15.60, False, 171),      # a 171% move is not "near"
+    (5.75, 84.00, False, 1361),     # the stale zone the gate exists for
+    (110.0, 132.0, True, 20),
+    (0.05, 30.90, False, 61700),
+])
+def test_a_leg_level_is_in_play_by_percentage_of_its_own_premium(
+        ltp, level, expect_in_play, pct):
+    at, near = A._leg_bands(ltp)
+    gap = abs(level - ltp)
+    assert round(gap / ltp * 100) == pct, "fixture drifted"
+    assert (gap <= near) is expect_in_play
+
+
+def test_the_reported_call_pivot_now_votes():
+    """End to end on the reported values: ₹5.75 call, pivots at ₹7.50/₹8.35."""
+    ss = _expiry_ss(_atm_leg_ltp={"ATM CE 24050": 5.75, "ATM PE 24050": 0.05},
+                    _leg_profiles={"CALL": {"hv_points": [
+                        {"price": 7.50, "side": "LOW"},
+                        {"price": 8.35, "side": "LOW"},
+                        {"price": 15.60, "side": "HIGH"}]},
+                        "call_label": "ATM CE 24050",
+                        "put_label": "ATM PE 24050"})
+    low = _by_check(A.build(ss), "CALL HVP LOW")
+    assert "Far from" not in low["position"]
+    assert low["align"] != BB.NEUTRAL
+    # the line 171% away is still out of reach and still abstains
+    assert _by_check(A.build(ss), "CALL HVP HIGH")["align"] == BB.NEUTRAL
+
+
+def test_the_gate_still_excludes_what_it_was_built_for():
+    """Widening the band must not bring back the ₹84 zone on a ₹5.75 call."""
+    row = _by_check(A.build(_expiry_ss()), "CALL LTP Resistance")
+    assert row["align"] == BB.NEUTRAL
+    assert "not in play" in row["remark"]
+
+
+# ── 12 · an OI wall is positional, so distance does not silence it ──────────
+#
+# A wall is where the writers are: a PE wall below spot is a floor beneath the
+# market and a CE wall above is a cap over it, and that is as true eighty points
+# away as at six. Gating it on proximity reported ⚪ for a wall plainly doing its
+# job.
+
+@pytest.mark.parametrize("check,wall,spot,expected", [
+    # the natural cases — the wall is doing its job from a distance
+    ("PUT Wall OI", 24300, 24380, BB.BULL),      # floor beneath
+    ("CALL Wall OI", 24400, 24320, BB.BEAR),     # cap above
+    # and the broken ones — position still decides, distance still does not
+    ("PUT Wall OI", 24400, 24320, BB.BEAR),      # price fell through the floor
+    ("CALL Wall OI", 24300, 24380, BB.BULL),     # price cleared the cap
+])
+def test_a_far_oi_wall_still_reports_its_bias(check, wall, spot, expected):
+    is_pe = check.startswith("PUT")
+    ss = {"_nifty_spot_live": float(spot),
+          "_market_picture": {"regime": "SIDEWAYS",
+                              "oi_floor": (wall, 9e4) if is_pe else None,
+                              "oi_ceiling": (wall, 9e4) if not is_pe else None}}
+    assert _by_check(A.build(ss), check)["align"] == expected
+
+
+def test_a_wall_price_is_sitting_on_is_still_undecided():
+    """The one distance at which a wall genuinely has not said which way it
+    goes. Recovering THAT would be inventing a read."""
+    ss = {"_nifty_spot_live": 24382.0,
+          "_market_picture": {"regime": "SIDEWAYS", "oi_floor": (24380, 9e4)}}
+    assert _by_check(A.build(ss), "PUT Wall OI")["align"] == BB.NEUTRAL
+
+
+def test_a_voting_wall_never_reads_as_far_from():
+    """"⚪ Far from ₹24,300" beside "🟢 Bull" is a contradiction on one line —
+    the glyph says the row abstained and the alignment says it did not."""
+    ss = {"_nifty_spot_live": 24380.0,
+          "_market_picture": {"regime": "SIDEWAYS", "oi_floor": (24300, 9e4)}}
+    row = _by_check(A.build(ss), "PUT Wall OI")
+    assert row["align"] == BB.BULL
+    assert "Far from" not in row["position"]
+    assert "Floor" in row["position"] and "below spot" in row["position"]
+
+
+def test_only_the_walls_are_structural():
+    """S/R, POC, HVP and the gamma flip keep the far-gate: an untested line
+    price is nowhere near is not saying anything about direction yet."""
+    ss = {"_nifty_spot_live": 24380.0, "_market_picture": {"regime": "SIDEWAYS"},
+          "_reaction_sr": {"support": {"price": 24000.0},
+                           "resistance": {"price": 24800.0}},
+          "_money_flow_data": {"poc_price": 24100.0},
+          "_gex_data": {"gamma_flip_level": 24900.0}}
+    for check in ("NIFTY Support", "NIFTY Resistance", "NIFTY POC", "Gamma Flip"):
+        row = _by_check(A.build(ss), check)
+        assert row["align"] == BB.NEUTRAL, check
+        assert "Far from" in row["position"], check

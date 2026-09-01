@@ -110,19 +110,61 @@ AT_BAND = 5.0
 #: beyond this, a level is not in play at all — "far from level".
 NEAR_BAND = 25.0
 
-#: `level_acceptance` observed state → (icon, phrase, holding?).
+#: how a verdict is expressed. The distinction is the whole correctness of the
+#: alignment column, so it is named rather than left implicit:
 #:
-#: `holding` is the third value: True when price respected the level, False when
-#: it went through, None while the market has not settled it. `_level_align`
-#: turns that into a direction; nothing else in this module reads the raw word.
+#: `HELD`  — a statement about the LEVEL, true whatever its role. "Price was
+#:           rejected here" means the level did its job whether it is support or
+#:           resistance.
+#: `ABOVE` — a statement about PRICE's side of the level, which means opposite
+#:           things for the two roles. Price above a support is that support
+#:           holding; price above a resistance is that resistance BROKEN.
+HELD = "held"
+ABOVE = "above"
+
+#: `level_acceptance` observed state → (icon, phrase, (kind, value)).
+#:
+#: ⚠️ `ACCEPTED_ABOVE` is not "the level held". It is "price settled above the
+#: level", and what that means depends entirely on which side the level was
+#: acting from. Recording both families as one boolean is what made every
+#: resistance row vote backwards.
 _OBSERVED = {
-    "ACCEPTED_ABOVE": ("🟢", "Accepted above", True),
-    "ACCEPTED_BELOW": ("🔴", "Accepted below", False),
-    "REJECTED": ("🔴", "Rejecting", True),
-    "TESTING": ("🟡", "Testing", None),
-    "BREAK_ATTEMPT": ("🟠", "Breaking", False),
-    "FAILED_BREAK_WAIT": ("🟡", "Failed break", None),
+    "ACCEPTED_ABOVE": ("🟢", "Accepted above", (ABOVE, True)),
+    "ACCEPTED_BELOW": ("🔴", "Accepted below", (ABOVE, False)),
+    "REJECTED": ("🔴", "Rejecting", (HELD, True)),
+    "BREAK_ATTEMPT": ("🟠", "Breaking", (HELD, False)),
+    "TESTING": ("🟡", "Testing", (None, None)),
+    "FAILED_BREAK_WAIT": ("🟡", "Failed break", (None, None)),
 }
+
+
+def _is_support(role: Optional[str]) -> bool:
+    """Whether a role acts from below. `bias_ball` accepts the VOB spellings
+    too, so they are normalised the same way here."""
+    r = str(role or "").lower()
+    return r in ("support", "bullish")
+
+
+def _holding(role: Optional[str], verdict: Tuple[Optional[str], Optional[bool]]
+             ) -> Optional[bool]:
+    """Did the level hold, given a verdict and the role it was acting in?
+
+    ⚠️ This is the fix for every resistance row voting backwards.
+
+    A `HELD` verdict is already role-independent and passes through. An `ABOVE`
+    verdict has to be resolved against the role, because the two are mirrors: a
+    support holds while price is above it, a resistance holds while price is
+    below. Treating `above` as `holding` — which every call site did — is right
+    for supports and exactly inverted for resistances, so a resistance price had
+    just broken to the upside reported as bearish, and one price was respectfully
+    sitting under reported as bullish.
+    """
+    kind, value = verdict
+    if kind is None or value is None:
+        return None
+    if kind == HELD:
+        return value
+    return value if _is_support(role) else (not value)
 
 
 # ── small readers ────────────────────────────────────────────────────────────
@@ -171,15 +213,35 @@ def _label(v: Any) -> Optional[str]:
     return str(v) if v else None
 
 
+#: at or above this, a price is an index level and whole rupees are the right
+#: precision; below it, it is an option premium and the paise matter.
+_INDEX_SCALE = 1000.0
+
+
 def _rupees(v: Optional[float]) -> str:
-    return f"₹{v:,.0f}" if v is not None else "—"
+    """A price, at the precision its magnitude deserves.
+
+    ⚠️ One formatter for every column, deliberately. Whole rupees are right for
+    ₹24,050 and destroy a premium: a leg trading at ₹0.05 with its high-volume
+    lines at ₹0.03 and ₹0.04 rendered as "₹0 · ₹0" — three different numbers,
+    all displayed as zero, on an expiry afternoon when those are exactly the
+    prices being decided.
+
+    The mixed case is worse than either. The value column formatted a pivot as
+    `₹31` while the position column beside it called the same pivot `₹30.90`,
+    because the two were rounded by different call sites. Routing both through
+    here is what stops that.
+    """
+    if v is None:
+        return "—"
+    return f"₹{v:,.0f}" if abs(v) >= _INDEX_SCALE else f"₹{v:,.2f}"
 
 
 def _levels_text(prices: Sequence[float], limit: int = 3) -> str:
     """`₹24,350 · ₹24,400 · ₹24,450` — the side-by-side form the checklist asks
     for wherever a row carries several levels at once."""
     got = [p for p in prices if p is not None][:limit]
-    return " · ".join(f"₹{p:,.0f}" for p in got) if got else "—"
+    return " · ".join(_rupees(p) for p in got) if got else "—"
 
 
 # ── the interaction column ───────────────────────────────────────────────────
@@ -202,28 +264,38 @@ def _zone_for(level: Optional[float], zones: Sequence[Mapping[str, Any]],
     return best
 
 
-def _positional(level: Optional[float], spot: Optional[float]) -> Tuple[str, Optional[bool]]:
+def _positional(level: Optional[float], spot: Optional[float]
+                ) -> Tuple[str, Tuple[Optional[str], Optional[bool]]]:
     """Where spot sits relative to a level, when nothing observed its behaviour.
 
     Deliberately weaker language than `_OBSERVED`: this says where price *is*,
-    never what it *did*. `holding` is None for the far case — a level price is
-    nowhere near is neither held nor broken, and reporting it as either would be
-    the invented claim this module refuses to make.
+    never what it *did* — so the verdict it returns is an `ABOVE`, and only the
+    caller, which knows the level's role, can turn that into "holding".
+
+    The verdict is empty for the at-band and the far case. A level price is
+    sitting exactly on is not yet decided, and one it is nowhere near is neither
+    held nor broken; reporting either as a direction would be the invented claim
+    this module refuses to make.
     """
     if level is None or spot is None:
-        return "—", None
+        return "—", (None, None)
     d = spot - level
     if abs(d) <= AT_BAND:
-        return f"🟡 At {_rupees(level)}", None
+        return f"🟡 At {_rupees(level)}", (None, None)
     if abs(d) > NEAR_BAND:
-        return f"⚪ Far from {_rupees(level)} ({d:+,.0f})", None
-    return ((f"🟢 Above {_rupees(level)} ({d:+,.0f})", True) if d > 0
-            else (f"🔴 Below {_rupees(level)} ({d:+,.0f})", False))
+        return f"⚪ Far from {_rupees(level)} ({d:+,.0f})", (None, None)
+    return ((f"🟢 Above {_rupees(level)} ({d:+,.0f})", (ABOVE, True)) if d > 0
+            else (f"🔴 Below {_rupees(level)} ({d:+,.0f})", (ABOVE, False)))
 
 
 def _interaction(level: Optional[float], spot: Optional[float],
-                 zones: Sequence[Mapping[str, Any]]) -> Tuple[str, Optional[bool], bool]:
+                 zones: Sequence[Mapping[str, Any]], role: Optional[str] = None
+                 ) -> Tuple[str, Optional[bool], bool]:
     """The third column: `(text, holding, observed)`.
+
+    `role` is what the level is acting as — a support or a resistance — and is
+    required to answer "did it hold": both sources report which SIDE of the
+    level price is on, and that means opposite things for the two roles.
 
     `observed` says which of the two sources answered — True when
     `level_acceptance` had a verdict for this level, False when this is the
@@ -233,13 +305,14 @@ def _interaction(level: Optional[float], spot: Optional[float],
     """
     z = _zone_for(level, zones)
     if z is not None:
-        icon, phrase, holding = _OBSERVED.get(
-            str(z.get("observed") or ""), ("", "", None))
+        icon, phrase, verdict = _OBSERVED.get(
+            str(z.get("observed") or ""), ("", "", (None, None)))
         if phrase:
             war = " · in war zone" if z.get("is_battle_zone") else ""
-            return f"{icon} {phrase} {_rupees(level)}{war}", holding, True
-    text, holding = _positional(level, spot)
-    return text, holding, False
+            return (f"{icon} {phrase} {_rupees(level)}{war}",
+                    _holding(role, verdict), True)
+    text, verdict = _positional(level, spot)
+    return text, _holding(role, verdict), False
 
 
 # ── the alignment column ─────────────────────────────────────────────────────
@@ -284,7 +357,7 @@ def _level_row(group: str, bucket: str, check: str, level: Optional[float],
     """One S/R-shaped row: a price, what spot is doing at it, what that means."""
     if level is None:
         return _na_row(group, bucket, check, missing)
-    text, holding, observed = _interaction(level, spot, zones)
+    text, holding, observed = _interaction(level, spot, zones, role)
     return _row(group, bucket, check, _rupees(level), text,
                 _level_align(chart, role, holding), remark, observed)
 
@@ -457,7 +530,7 @@ def _structure(ss: Mapping[str, Any], mp: Mapping[str, Any], spot: Optional[floa
                                 "no high-volume pivots on the index frame"))
             continue
         nearest = _nearest_to(pts, spot)
-        text, holding, observed = _interaction(nearest, spot, zones)
+        text, holding, observed = _interaction(nearest, spot, zones, role)
         rows.append(_row(STRUCTURE, B_STRUCTURE, check, _levels_text(_by_distance(pts, spot)),
                          text, _level_align("NIFTY", role, holding),
                          f"{len(pts)} pivot line(s) · nearest {_rupees(nearest)}", observed))
@@ -566,6 +639,44 @@ def _magnet_row(mp: Mapping[str, Any], ss: Mapping[str, Any],
                 + (" · expiry" if read.get("expiry") else ""))
 
 
+def _leg_bands(ltp: float) -> Tuple[float, float]:
+    """`(at, near)` for a leg, as a fraction of its own premium.
+
+    Index points cannot be reused here: ₹5 is a touch on a ₹300 leg and a
+    different world on a ₹20 one. The floors keep a near-worthless expiry-day
+    leg from having a band of nothing.
+
+    ⚠️ The near band is 5% of the premium, not the 2% it started at. Two per
+    cent of an option is about one minute's movement — a ₹100 leg travels ₹2
+    without anything happening — so nearly every pivot and zone fell outside it
+    and abstained, and the summary filled up with ⚪ from rows that had a
+    perfectly good read. Five per cent is still a tight window, and still
+    excludes by a wide margin the case this gate exists for: a ₹5.75 leg
+    carrying a stale zone at ₹84.
+    """
+    return max(ltp * 0.005, 0.25), max(ltp * 0.05, 0.5)
+
+
+def _distance_word(price: float, level: float, at: float, near: float
+                   ) -> Tuple[str, str, Tuple[Optional[str], Optional[bool]]]:
+    """`(icon, word, verdict)` for a price against a level it may be nowhere
+    near.
+
+    The verdict is an `ABOVE` — which side of the level price is on — and is
+    empty unless the level is close enough to be in play. Resolving it into
+    "holding" needs the role and belongs to `_holding`; returning it as a bare
+    boolean is what let a leg's resistance rows read backwards, exactly as the
+    index rows did.
+    """
+    gap = abs(price - level)
+    if gap <= at:
+        return "🟡", "At", (None, None)
+    if gap > near:
+        return "⚪", "Far from", (None, None)
+    return (("🟢", "Above", (ABOVE, True)) if price > level
+            else ("🔴", "Below", (ABOVE, False)))
+
+
 def _prefer_align(preferred: Optional[str], ce_e: Optional[float],
                   pe_e: Optional[float]) -> str:
     """Stage 71.7's premium preference → a NIFTY direction.
@@ -644,8 +755,15 @@ def _premium(ss: Mapping[str, Any], zones: Sequence[Mapping[str, Any]]) -> List[
             _prefer_align(bias, ce_e, pe_e),
             bias or "which side is carrying the participation"))
     else:
-        rows.append(_na_row(PREMIUM, B_OPTIONS, "Premium Energy",
-                            "Stage 71.7 energy not published"))
+        # Two different faults, and they need different people to look at them:
+        # the stage never ran (its panel is upstream, on the Trading tab), or it
+        # ran and reported no score. One message for both sent me checking the
+        # bridge path twice for what was an absent key.
+        rows.append(_na_row(
+            PREMIUM, B_OPTIONS, "Premium Energy",
+            "Stage 71.7 published no energy score for either side"
+            if pe_energy else
+            "Stage 71.7 has not published — its panel runs on the Trading tab"))
 
     profiles = _map(ss.get("_leg_profiles"))
     vob = _map(ss.get("_atm_leg_vob_volume"))
@@ -701,31 +819,68 @@ def _premium(ss: Mapping[str, Any], zones: Sequence[Mapping[str, Any]]) -> List[
             got = [z for z in (legzones or ())
                    if isinstance(z, Mapping) and z.get("zone_type") == zone_type]
             if not got or ltp is None:
-                rows.append(_na_row(PREMIUM, B_OPTIONS, check,
-                                    "leg VOB zones not published"
-                                    if not got else "no leg LTP published"))
+                # ⚠️ "not published" is a plumbing claim, and it was being made
+                # about a working engine. `analyze_vob_volume` runs per leg and
+                # returns only the zones it finds — a leg with bearish blocks
+                # and no bullish ones is a real market state (common near
+                # expiry, when nothing has built below the premium), not a
+                # missing producer. Saying so sends the reader to the chart
+                # instead of to the store.
+                if ltp is None:
+                    why = "no leg premium published"
+                elif legzones:
+                    why = (f"the engine found no {role} zone on this leg "
+                           f"({len(legzones)} zone(s), none {zone_type})")
+                else:
+                    why = "no VOB zones published for this leg"
+                rows.append(_na_row(PREMIUM, B_OPTIONS, check, why))
                 continue
             mids = [m for m in (_f(z.get("mid")) for z in got) if m is not None]
             nearest = min(got, key=lambda z: abs((_f(z.get("mid")) or 0) - ltp))
+            mid = _f(nearest.get("mid"))
             status = str(nearest.get("status") or "")
-            # BUILDING / INTACT = the zone is doing its job; BREAKING = it
-            # failed; FADING = flow turned against it but it has not gone.
-            holding = (True if status in ("BUILDING", "INTACT") else
-                       False if status == "BREAKING" else None)
-            icon = {"BUILDING": "🟢", "INTACT": "🟢",
-                    "BREAKING": "🔴", "FADING": "🟠"}.get(status, "🟡")
+            _at, _near = _leg_bands(ltp)
+
+            # ⚠️ Distance first, status second — and this ordering is the fix
+            # for a row that was casting real votes on unreachable levels.
+            #
+            # `analyze_vob_volume`'s `status` describes what the flow did INSIDE
+            # the zone; it is not a claim that price is interacting with it now.
+            # On an expiry afternoon a CALL trading at ₹5.75 carried a zone at
+            # ₹84 still marked INTACT — "sellers held the majority in there",
+            # perfectly true, and fifteen times away from any price the leg can
+            # reach. Taken as a live read it voted BEAR into the summary.
+            #
+            # So a zone outside the leg's own near band reports its distance and
+            # abstains, exactly as the index rows and the leg HVP rows already
+            # do. Every other level in this table is gated this way; this one
+            # was not, and it was the only one that could vote from that far
+            # out.
+            if mid is None or abs(mid - ltp) > _near:
+                icon, word, _verdict = _distance_word(ltp, mid or 0.0, _at, _near)
+                holding = _holding(role, _verdict)
+                position = f"{icon} {word} {_rupees(mid)}"
+                remark = (f"zone {status.lower() or 'unclassified'}, but "
+                          f"{abs((mid or 0) - ltp):,.2f} away — not in play")
+            else:
+                # BUILDING / INTACT = the zone is doing its job; BREAKING = it
+                # failed; FADING = flow turned against it but it has not gone.
+                holding = (True if status in ("BUILDING", "INTACT") else
+                           False if status == "BREAKING" else None)
+                icon = {"BUILDING": "🟢", "INTACT": "🟢",
+                        "BREAKING": "🔴", "FADING": "🟠"}.get(status, "🟡")
+                position = (f"{icon} {status.title() or 'Unclassified'} "
+                            f"{_rupees(mid)}")
+                remark = (f"{nearest.get('dominant') or '—'} dominant · "
+                          f"{_f(nearest.get('bull_pct')) or 0:.0f}% buy volume")
             rows.append(_row(
                 PREMIUM, B_OPTIONS, check, _levels_text(_by_distance(mids, ltp), 2),
-                f"{icon} {status.title() or 'Unclassified'} "
-                f"{_rupees(_f(nearest.get('mid')))}",
-                _level_align(chart, role, holding),
-                f"{nearest.get('dominant') or '—'} dominant · "
-                f"{_f(nearest.get('bull_pct')) or 0:.0f}% buy volume"))
+                position, _level_align(chart, role, holding), remark))
 
         # The premium itself. Reported, never scored: a price is not a
         # direction, and the leg's S/R rows above are where its behaviour votes.
         rows.append(_row(PREMIUM, B_OPTIONS, f"{chart} LTP Price",
-                         f"₹{ltp:,.2f}" if ltp is not None else "—", "—", INFO,
+                         _rupees(ltp), "—", INFO,
                          f"{name} — current premium" if name else "leg not resolved")
                     if ltp is not None else
                     _na_row(PREMIUM, B_OPTIONS, f"{chart} LTP Price",
@@ -746,25 +901,16 @@ def _premium(ss: Mapping[str, Any], zones: Sequence[Mapping[str, Any]]) -> List[
                     else "no leg premium published — cannot place the lines"))
                 continue
             nearest = _nearest_to(pts, ltp)
-            gap = abs((nearest or 0) - ltp)
-            # Bands are a fraction of the premium, not index points: ₹5 is a
-            # touch on a ₹300 leg and a different world on a ₹20 one.
-            near_band = max(ltp * 0.02, 0.5)
-            at_band = max(ltp * 0.005, 0.25)
-            holding = None if gap <= at_band else (
-                None if gap > near_band else (ltp > (nearest or 0)))
-            word = ("At" if gap <= at_band else
-                    "Far from" if gap > near_band else
-                    "Above" if ltp > (nearest or 0) else "Below")
-            icon = ("🟡" if gap <= at_band else "⚪" if gap > near_band else
-                    "🟢" if ltp > (nearest or 0) else "🔴")
+            _at, _near = _leg_bands(ltp)
+            icon, word, _verdict = _distance_word(ltp, nearest or 0.0, _at, _near)
+            holding = _holding(role, _verdict)
             rows.append(_row(
                 PREMIUM, B_OPTIONS, check, _levels_text(_by_distance(pts, ltp), 2),
-                f"{icon} {word} ₹{nearest:,.2f}",
+                f"{icon} {word} {_rupees(nearest)}",
                 # `hvp_bias` owns HIGH→resistance / LOW→support plus the PUT
                 # inversion; the hold/break flip is applied on top of it.
                 _level_align(chart, role, holding),
-                f"LTP ₹{ltp:,.2f} · {len(pts)} line(s)", observed=False))
+                f"LTP {_rupees(ltp)} · {len(pts)} line(s)", observed=False))
     return rows
 
 

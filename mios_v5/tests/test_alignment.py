@@ -510,3 +510,228 @@ def test_a_missing_leg_premium_does_not_blame_the_pivots():
     row = _by_check(A.build(ss), "PUT HVP HIGH")
     assert "premium" in row["remark"]
     assert "no high-volume pivots" not in row["remark"]
+
+
+# ── 8 · precision and reach, from a live expiry afternoon ────────────────────
+#
+# Both of these shipped rendering plausible-looking rows. The first displayed
+# three different prices as the same number; the second cast a real vote from a
+# level the premium could not reach.
+
+def _expiry_ss(**over):
+    """A near-expiry leg pair: the CALL at ₹5.75, the PUT at 5 paise, and both
+    carrying VOB zones from earlier in the session when they were worth more."""
+    ss = {
+        "_nifty_spot_live": 24055.0,
+        "_market_picture": {"regime": "SIDEWAYS"},
+        "_atm_leg_ltp": {"ATM CE 24050": 5.75, "ATM PE 24050": 0.05},
+        "_atm_leg_vob_volume": {
+            "ATM CE 24050": [{"zone_type": "bearish", "mid": 84.0,
+                              "status": "INTACT", "dominant": "balanced",
+                              "bull_pct": 50}],
+            "ATM PE 24050": [{"zone_type": "bearish", "mid": 34.0,
+                              "status": "FADING", "dominant": "balanced",
+                              "bull_pct": 58}]},
+        "_leg_profiles": {
+            "CALL": {"hv_points": [{"price": 15.60, "side": "HIGH"},
+                                   {"price": 7.50, "side": "LOW"}]},
+            "PUT": {"hv_points": [{"price": 30.90, "side": "HIGH"},
+                                  {"price": 0.03, "side": "LOW"},
+                                  {"price": 0.04, "side": "LOW"}]},
+            "call_label": "ATM CE 24050", "put_label": "ATM PE 24050"},
+    }
+    ss.update(over)
+    return ss
+
+
+def test_a_premium_keeps_its_paise():
+    """"₹0 · ₹0" was three different prices — a 5-paise leg and its pivots at
+    ₹0.03 and ₹0.04 — all rounded to zero, on the afternoon those are exactly
+    the prices being decided."""
+    row = _by_check(A.build(_expiry_ss()), "PUT HVP LOW")
+    assert row["value"] == "₹0.04 · ₹0.03"
+    assert "₹0.04" in row["position"]
+
+
+def test_an_index_level_keeps_whole_rupees():
+    """The same formatter must not put paise on a 24,000-point index level."""
+    assert _by_check(A.build(_ss()), "NIFTY Support")["value"] == "₹24,350"
+    assert A._rupees(24350.0) == "₹24,350"
+    assert A._rupees(0.05) == "₹0.05"
+    assert A._rupees(84.0) == "₹84.00"
+
+
+def test_both_columns_round_a_price_the_same_way():
+    """The value column said "₹31" while the position column beside it called
+    the same pivot "₹30.90", because two call sites rounded it differently."""
+    row = _by_check(A.build(_expiry_ss()), "PUT HVP HIGH")
+    assert "₹30.90" in row["value"]
+    assert "₹30.90" in row["position"]
+
+
+def test_a_leg_zone_out_of_reach_does_not_vote():
+    """The serious one. `analyze_vob_volume`'s status describes what the flow
+    did INSIDE the zone — it is not a claim that price is interacting with it.
+    A CALL at ₹5.75 carried a zone at ₹84 still marked INTACT, and that voted
+    BEAR into the summary from fifteen times away."""
+    row = _by_check(A.build(_expiry_ss()), "CALL LTP Resistance")
+    assert row["align"] == BB.NEUTRAL, "an unreachable zone must abstain"
+    assert "Far from" in row["position"]
+    assert "not in play" in row["remark"]
+    # the levels are still REPORTED — abstaining is not hiding them
+    assert "₹84.00" in row["value"]
+
+
+def test_a_leg_zone_in_reach_still_votes():
+    """The gate must not silence a zone the premium is actually at."""
+    ss = _expiry_ss(_atm_leg_ltp={"ATM CE 24050": 83.0, "ATM PE 24050": 0.05})
+    row = _by_check(A.build(ss), "CALL LTP Resistance")
+    assert row["align"] == BB.BEAR       # CALL resistance holding = bearish
+    assert "Intact" in row["position"]
+
+
+def test_the_leg_bands_are_shared_by_the_zone_and_pivot_rows():
+    """Two definitions of 'near' would let one row call a level in play while
+    the row beneath it calls the same distance far away."""
+    at, near = A._leg_bands(100.0)
+    assert (at, near) == (0.5, 5.0)
+    # and the floors keep a near-worthless expiry leg from having no band
+    assert A._leg_bands(0.05) == (0.25, 0.5)
+
+
+@pytest.mark.parametrize("price,level,expected", [
+    (100.0, 99.9, (None, None)),        # inside the at-band — unsettled
+    (100.0, 99.0, (A.ABOVE, True)),     # near and above
+    (100.0, 101.0, (A.ABOVE, False)),   # near and below
+    (100.0, 50.0, (None, None)),        # far — abstains
+])
+def test_distance_reports_which_side_and_whether_it_counts(price, level, expected):
+    """The verdict is a side, not a direction — `_holding` turns it into one
+    once it knows the role."""
+    at, near = A._leg_bands(price)
+    assert A._distance_word(price, level, at, near)[2] == expected
+
+
+def test_a_working_engine_that_found_nothing_is_not_called_unpublished():
+    """"not published" is a plumbing claim. `analyze_vob_volume` returning only
+    bearish zones is a real market state — common near expiry, when nothing has
+    built below the premium — and reporting it as a missing producer sends the
+    reader to the store instead of the chart."""
+    row = _by_check(A.build(_expiry_ss()), "CALL LTP Support")
+    assert "found no support zone" in row["remark"]
+    assert "not published" not in row["remark"]
+    # a leg with no zones at all still says so plainly
+    ss = _expiry_ss(_atm_leg_vob_volume={"ATM CE 24050": []})
+    assert "no VOB zones published" in _by_check(
+        A.build(ss), "CALL LTP Support")["remark"]
+
+
+def test_the_energy_row_distinguishes_absent_from_empty():
+    """Two faults needing two different people: the stage never ran, or it ran
+    and scored nothing."""
+    absent = _by_check(A.build(_expiry_ss()), "Premium Energy")
+    assert "has not published" in absent["remark"]
+    empty = _by_check(A.build(_expiry_ss(_premium_energy={"bridge": {}})),
+                      "Premium Energy")
+    assert "no energy score" in empty["remark"]
+
+
+# ── 9 · every resistance row was voting backwards ───────────────────────────
+#
+# Reported from a live summary: "War Zone Resistance — 🟢 Above ₹24,046 (+10)"
+# appeared under WHY, supporting a BEARISH net read. Price ten points ABOVE a
+# resistance means that resistance broke, which is bullish. Both sources of the
+# interaction column report which SIDE of the level price is on, and every call
+# site was reading that as "the level held" — right for a support, exactly
+# inverted for a resistance.
+
+@pytest.mark.parametrize("role,above,expected", [
+    # a support holds while price is above it …
+    ("support", True, True),
+    ("support", False, False),
+    # … a resistance is the mirror: it holds while price is BELOW
+    ("resistance", True, False),
+    ("resistance", False, True),
+    # the VOB spellings normalise the same way bias_ball accepts them
+    ("bullish", True, True),
+    ("bearish", True, False),
+])
+def test_which_side_price_is_on_resolves_against_the_role(role, above, expected):
+    assert A._holding(role, (A.ABOVE, above)) is expected
+
+
+@pytest.mark.parametrize("role", ["support", "resistance"])
+def test_a_rejection_reads_the_same_whatever_the_role(role):
+    """REJECTED and BREAK_ATTEMPT are statements about the LEVEL — it did or did
+    not do its job — so they must not be flipped by the role the way a
+    side-of-the-level verdict is."""
+    assert A._holding(role, (A.HELD, True)) is True
+    assert A._holding(role, (A.HELD, False)) is False
+
+
+def test_an_unsettled_verdict_stays_unsettled():
+    assert A._holding("resistance", (None, None)) is None
+
+
+def test_price_above_a_resistance_is_bullish():
+    """The reported bug, end to end: spot ₹24,056 against a resistance at
+    ₹24,046 is a broken resistance, and broken resistance is bullish."""
+    ss = {"_nifty_spot_live": 24056.0, "_market_picture": {"regime": "SIDEWAYS"},
+          "_reaction_sr": {"support": {"price": 24000.0},
+                           "resistance": {"price": 24046.0}}}
+    assert _by_check(A.build(ss), "NIFTY Resistance")["align"] == BB.BULL
+
+
+def test_price_below_a_resistance_is_bearish():
+    """And the mirror still works — a resistance price is sitting under is
+    capping it."""
+    ss = {"_nifty_spot_live": 24036.0, "_market_picture": {"regime": "SIDEWAYS"},
+          "_reaction_sr": {"support": {"price": 24000.0},
+                           "resistance": {"price": 24046.0}}}
+    assert _by_check(A.build(ss), "NIFTY Resistance")["align"] == BB.BEAR
+
+
+def test_a_support_is_unaffected_by_the_fix():
+    """Supports were always right; the fix must not move them."""
+    ss = {"_nifty_spot_live": 24056.0, "_market_picture": {"regime": "SIDEWAYS"},
+          "_reaction_sr": {"support": {"price": 24050.0},
+                           "resistance": {"price": 24200.0}}}
+    assert _by_check(A.build(ss), "NIFTY Support")["align"] == BB.BULL
+
+
+def test_an_accepted_above_on_a_resistance_is_a_break_not_a_hold():
+    """`level_acceptance.ACCEPTED_ABOVE` means price settled above the level —
+    on a resistance that is the break, not the hold."""
+    ss = {"_nifty_spot_live": 24056.0, "_market_picture": {"regime": "SIDEWAYS"},
+          "_reaction_sr": {"support": {"price": 24000.0},
+                           "resistance": {"price": 24054.0}},
+          "_la_zones_latest": [{"price": 24054.0,
+                                "observed": LA.ACCEPTED_ABOVE}]}
+    row = _by_check(A.build(ss), "NIFTY Resistance")
+    assert row["observed"] is True
+    assert row["align"] == BB.BULL
+
+
+def test_an_index_high_pivot_above_spot_caps_and_below_spot_is_broken():
+    """HVP HIGH is a resistance line — `bias_ball.hvp_bias` says so — and had
+    the same inversion."""
+    def _hvp(spot, pivot):
+        ss = {"_nifty_spot_live": spot, "_market_picture": {"regime": "SIDEWAYS"},
+              "_leg_profiles": {"NIFTY": {"hv_points": [{"price": pivot,
+                                                         "side": "HIGH"}]}}}
+        return _by_check(A.build(ss), "NIFTY HVP HIGH")["align"]
+    assert _hvp(24056.0, 24040.0) == BB.BULL     # cleared it
+    assert _hvp(24036.0, 24050.0) == BB.BEAR     # still under it
+
+
+def test_a_call_leg_above_its_high_pivot_is_bullish_for_nifty():
+    """The leg rows share `_distance_word`, so they carried the same bug — and
+    then the PUT inversion sits on top of it."""
+    ss = _expiry_ss(_atm_leg_ltp={"ATM CE 24050": 20.0, "ATM PE 24050": 0.05},
+                    _leg_profiles={"CALL": {"hv_points": [{"price": 19.50,
+                                                           "side": "HIGH"}]},
+                                   "call_label": "ATM CE 24050",
+                                   "put_label": "ATM PE 24050"})
+    # CALL premium above its high pivot = broken resistance on the call =
+    # call strengthening = NIFTY bullish
+    assert _by_check(A.build(ss), "CALL HVP HIGH")["align"] == BB.BULL

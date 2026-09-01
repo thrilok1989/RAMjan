@@ -829,52 +829,89 @@ def test_the_gate_still_excludes_what_it_was_built_for():
     assert "not in play" in row["remark"]
 
 
-# ── 12 · an OI wall is positional, so distance does not silence it ──────────
+# ── 12 · an OI wall is ROOM, not a level price is holding or breaking ───────
 #
-# A wall is where the writers are: a PE wall below spot is a floor beneath the
-# market and a CE wall above is a cap over it, and that is as true eighty points
-# away as at six. Gating it on proximity reported ⚪ for a wall plainly doing its
-# job.
+# Every other row asks "did this level hold or break". A wall asks how much
+# room there is before the writers are in the way — the strike barely moves, so
+# what changes through the day is the distance to it, and that distance is the
+# read. Both directions invert against the naive reading, which is exactly why
+# the position-based rule got the near cases backwards.
 
-@pytest.mark.parametrize("check,wall,spot,expected", [
-    # the natural cases — the wall is doing its job from a distance
-    ("PUT Wall OI", 24300, 24380, BB.BULL),      # floor beneath
-    ("CALL Wall OI", 24400, 24320, BB.BEAR),     # cap above
-    # and the broken ones — position still decides, distance still does not
-    ("PUT Wall OI", 24400, 24320, BB.BEAR),      # price fell through the floor
-    ("CALL Wall OI", 24300, 24380, BB.BULL),     # price cleared the cap
+@pytest.mark.parametrize("check,wall,spot,expected,why", [
+    # the CAP: close overhead is the thing stopping the move …
+    ("CALL Wall OI", 24400, 24400, BB.BEAR, "sitting on the cap"),
+    ("CALL Wall OI", 24400, 24380, BB.BEAR, "20 pts under the cap"),
+    ("CALL Wall OI", 24400, 24420, BB.BEAR, "20 pts over, still in its shadow"),
+    # … and far away is headroom
+    ("CALL Wall OI", 24400, 24200, BB.BULL, "200 pts of room to run"),
+    # the FLOOR: close underfoot is writers defending …
+    ("PUT Wall OI", 24300, 24300, BB.BULL, "sitting on the floor"),
+    ("PUT Wall OI", 24300, 24320, BB.BULL, "20 pts above the floor"),
+    ("PUT Wall OI", 24300, 24280, BB.BULL, "20 pts under, still supported"),
+    # … and far away is air beneath the market
+    ("PUT Wall OI", 24300, 24500, BB.BEAR, "200 pts of nothing below"),
 ])
-def test_a_far_oi_wall_still_reports_its_bias(check, wall, spot, expected):
+def test_a_wall_is_scored_by_how_much_room_it_leaves(check, wall, spot,
+                                                     expected, why):
     is_pe = check.startswith("PUT")
     ss = {"_nifty_spot_live": float(spot),
           "_market_picture": {"regime": "SIDEWAYS",
                               "oi_floor": (wall, 9e4) if is_pe else None,
                               "oi_ceiling": (wall, 9e4) if not is_pe else None}}
-    assert _by_check(A.build(ss), check)["align"] == expected
+    assert _by_check(A.build(ss), check)["align"] == expected, why
 
 
-def test_a_wall_price_is_sitting_on_is_still_undecided():
-    """The one distance at which a wall genuinely has not said which way it
-    goes. Recovering THAT would be inventing a read."""
-    ss = {"_nifty_spot_live": 24382.0,
-          "_market_picture": {"regime": "SIDEWAYS", "oi_floor": (24380, 9e4)}}
-    assert _by_check(A.build(ss), "PUT Wall OI")["align"] == BB.NEUTRAL
+def test_at_and_near_a_wall_are_the_same_answer():
+    """Price sitting on a cap and price twenty points under it are the same
+    trading fact — the cap is in the way. Splitting them would produce a
+    neutral row at the one distance the wall matters most."""
+    def _wall(spot):
+        ss = {"_nifty_spot_live": float(spot),
+              "_market_picture": {"regime": "SIDEWAYS",
+                                  "oi_ceiling": (24400, 9e4)}}
+        return _by_check(A.build(ss), "CALL Wall OI")["align"]
+    assert _wall(24400) == _wall(24380) == _wall(24399) == BB.BEAR
 
 
-def test_a_voting_wall_never_reads_as_far_from():
-    """"⚪ Far from ₹24,300" beside "🟢 Bull" is a contradiction on one line —
-    the glyph says the row abstained and the alignment says it did not."""
-    ss = {"_nifty_spot_live": 24380.0,
-          "_market_picture": {"regime": "SIDEWAYS", "oi_floor": (24300, 9e4)}}
-    row = _by_check(A.build(ss), "PUT Wall OI")
-    assert row["align"] == BB.BULL
-    assert "Far from" not in row["position"]
-    assert "Floor" in row["position"] and "below spot" in row["position"]
+def test_a_wall_never_abstains():
+    """A wall always has a reading — it is either in the way or it is not.
+    There is no distance at which it says nothing."""
+    for spot in (24000, 24395, 24400, 24405, 25000):
+        ss = {"_nifty_spot_live": float(spot),
+              "_market_picture": {"regime": "SIDEWAYS",
+                                  "oi_ceiling": (24400, 9e4)}}
+        row = _by_check(A.build(ss), "CALL Wall OI")
+        assert row["align"] in (BB.BULL, BB.BEAR), spot
 
 
-def test_only_the_walls_are_structural():
+def test_the_wall_wording_matches_its_score():
+    """"Far from ₹24,400" beside 🟢 Bull was a contradiction on one line. The
+    text now names what the wall IS from here, which is the thing that votes."""
+    def _pos(spot, key, wall):
+        ss = {"_nifty_spot_live": float(spot),
+              "_market_picture": {"regime": "SIDEWAYS", key: (wall, 9e4)}}
+        check = "CALL Wall OI" if key == "oi_ceiling" else "PUT Wall OI"
+        return _by_check(A.build(ss), check)["position"]
+    assert "Cap in the way" in _pos(24380, "oi_ceiling", 24400)
+    assert "Cap clear" in _pos(24200, "oi_ceiling", 24400)
+    assert "Floor underfoot" in _pos(24320, "oi_floor", 24300)
+    assert "Floor distant" in _pos(24500, "oi_floor", 24300)
+    assert "Far from" not in _pos(24200, "oi_ceiling", 24400)
+
+
+def test_a_wall_does_not_go_through_the_hold_or_break_rule():
+    """Guards the confusion this replaced: the walls have their own builder, so
+    a future change to the S/R rule cannot silently re-score them."""
+    src = pathlib.Path(A.__file__).read_text()
+    assert "def _wall_row(" in src
+    assert "_wall_row(\"PUT Wall OI\"" in src
+    assert "_wall_row(\"CALL Wall OI\"" in src
+
+
+def test_only_the_walls_escape_the_far_gate():
     """S/R, POC, HVP and the gamma flip keep the far-gate: an untested line
-    price is nowhere near is not saying anything about direction yet."""
+    price is nowhere near is not saying anything about direction yet. Only the
+    walls, which are read as room rather than as levels, always report."""
     ss = {"_nifty_spot_live": 24380.0, "_market_picture": {"regime": "SIDEWAYS"},
           "_reaction_sr": {"support": {"price": 24000.0},
                            "resistance": {"price": 24800.0}},
@@ -884,3 +921,86 @@ def test_only_the_walls_are_structural():
         row = _by_check(A.build(ss), check)
         assert row["align"] == BB.NEUTRAL, check
         assert "Far from" in row["position"], check
+
+
+# ── 13 · there is ONE war zone ──────────────────────────────────────────────
+#
+# Stage 35 publishes `battle_zone = {"type": "SUPPORT"|"RESISTANCE", "price"}`:
+# a single contested price and the side the fight is running from. The type is
+# not a property of the price — it flips when the fight does.
+#
+# The table had a "War Zone Support" row and a "War Zone Resistance" row, built
+# from `low`/`high` keys that do not exist on that object. The fallback fired on
+# every cycle and put the SAME price on two rows, voting in opposite directions.
+
+def _war(bz=None, winner=None, probs=None, spot=24302.0):
+    return A._final({"battle_zone": bz, "expected_winner": winner,
+                     "probabilities": probs or {}}, {}, spot, [])[0]
+
+
+def test_there_is_exactly_one_war_zone_row():
+    checks = [r["check"] for r in A.build(_ss())["rows"]]
+    assert checks.count("War Zone") == 1
+    assert "War Zone Support" not in checks
+    assert "War Zone Resistance" not in checks
+
+
+def test_the_battle_zone_has_no_band_to_split():
+    """The producer's own shape is the argument: one price, one type, no edges.
+    If Stage 35 ever grows a band this test fails and the split can be
+    reconsidered — until then, inventing one is fabricating a level."""
+    src = pathlib.Path(
+        A.__file__).parent.joinpath("engines/stage35_reaction_zone.py").read_text()
+    assert '"battle_zone": {"type": zone_type, "price": zone_price}' in src
+
+
+@pytest.mark.parametrize("kind,winner,expected", [
+    # the SAME support zone, read by who is winning the fight at it
+    ("SUPPORT", "Buyers (bounce)", BB.BULL),
+    ("SUPPORT", "Sellers (breakdown)", BB.BEAR),
+    # and the same resistance zone likewise
+    ("RESISTANCE", "Sellers (rejection)", BB.BEAR),
+    ("RESISTANCE", "Buyers (breakout)", BB.BULL),
+])
+def test_one_zone_changes_side_with_the_war(kind, winner, expected):
+    assert _war({"type": kind, "price": 24300}, winner)["align"] == expected
+
+
+def test_contested_is_an_answer_not_a_gap():
+    """Stage 35 declining to call the fight is a verdict. Falling through to
+    the hold/break rule would overrule the engine that just abstained."""
+    row = _war({"type": "SUPPORT", "price": 24300}, "Contested")
+    assert row["align"] == BB.NEUTRAL
+    assert "Contested" in row["remark"]
+
+
+def test_with_no_winner_the_zones_own_type_decides():
+    """Only when Stage 35 published no winner does the row fall back to what
+    price is doing at the level — and then the zone's `type`, not spot's side
+    of it, says whether holding is bullish."""
+    holding_support = _war({"type": "SUPPORT", "price": 24300}, None, spot=24320.0)
+    assert holding_support["align"] == BB.BULL
+    assert "fighting as support" in holding_support["remark"]
+
+    under_resistance = _war({"type": "RESISTANCE", "price": 24400}, None,
+                            spot=24380.0)
+    assert under_resistance["align"] == BB.BEAR
+    assert "fighting as resistance" in under_resistance["remark"]
+
+
+def test_the_row_says_which_side_the_zone_is_fighting_from():
+    """The type is the whole point of the row — a reader cannot interpret
+    "Buyers winning" without knowing what they are defending."""
+    assert "fighting as resistance" in _war(
+        {"type": "RESISTANCE", "price": 24400}, "Buyers (breakout)")["remark"]
+
+
+def test_price_inside_the_zone_is_marked_as_such():
+    assert "Inside war zone" in _war({"type": "SUPPORT", "price": 24300},
+                                     "Contested", spot=24302.0)["position"]
+
+
+def test_no_battle_zone_is_a_reported_absence():
+    row = _war(None, None)
+    assert row["align"] == A.NA
+    assert "not at a contested level" in row["remark"]

@@ -432,7 +432,11 @@ def terminal_charts_split(nifty_df=None, call_df=None, put_df=None,
                           nifty_profile: Optional[Dict[str, Any]] = None,
                           call_profile: Optional[Dict[str, Any]] = None,
                           put_profile: Optional[Dict[str, Any]] = None,
-                          price_action: bool = False):
+                          price_action: bool = False,
+                          index_label: str = "NIFTY",
+                          theme: Optional[Dict[str, str]] = None,
+                          call_sr: Optional[Dict[str, Any]] = None,
+                          put_sr: Optional[Dict[str, Any]] = None):
     """NIFTY, ATM Call and ATM Put as THREE independent figures.
 
     `terminal_chart` above draws one figure so Streamlit's single Fullscreen
@@ -458,7 +462,15 @@ def terminal_charts_split(nifty_df=None, call_df=None, put_df=None,
     from plotly.subplots import make_subplots
 
     from ..clock import today_slice
-    panels = [("NIFTY", today_slice(nifty_df)),
+    from .chart_theme import palette as _palette
+    # Chrome only — candles, levels and zones keep their semantic colours,
+    # which are chosen to read on either background.
+    _c = dict(theme) if theme else _palette(None)
+    # `index_label` names the panel; SPLIT_KEYS still keys it as "NIFTY" so
+    # every profile/height/figure lookup below is untouched. Without this the
+    # index panel read "NIFTY" even when the frame held SENSEX candles — the
+    # chart had switched and there was no way to see that it had.
+    panels = [(index_label, today_slice(nifty_df)),
               (call_label, today_slice(call_df)),
               (put_label, today_slice(put_df))]
     # the today-sliced frames per chart key, for the opt-in price-action overlay
@@ -478,8 +490,8 @@ def terminal_charts_split(nifty_df=None, call_df=None, put_df=None,
     # to each figure independently so they still show the same span.
     rng = x_range(_last_x(parsed), window_minutes)
 
-    leg_over = {"CALL": (call_levels, call_zones),
-                "PUT": (put_levels, put_zones)}
+    leg_over = {"CALL": (call_levels, call_zones, call_sr),
+                "PUT": (put_levels, put_zones, put_sr)}
     profiles = {"NIFTY": nifty_profile, "CALL": call_profile,
                 "PUT": put_profile}
     # NIFTY spans the full height in the combined layout; the two legs share it
@@ -531,29 +543,29 @@ def terminal_charts_split(nifty_df=None, call_df=None, put_df=None,
                 if v is None:
                     continue
                 fig.add_hline(y=v, row=1, col=1, line_width=1, line_dash="dot",
-                              line_color=HTF_COLOUR,
+                              line_color=_c["htf"],
                               annotation_text=f"{label} {v:,.0f}",
                               annotation_position="left",
                               annotation_font=dict(size=8, color=HTF_COLOUR))
-            _add_signal(go, fig, p, signal)
+            _add_signal(go, fig, p, signal, edge=_c["marker_edge"])
         else:
-            _lv, _zn = leg_over[key]
-            _leg_overlay(fig, _lv, _zn, 1, 1)
+            _lv, _zn, _sr = leg_over[key]
+            _leg_overlay(fig, _lv, _zn, 1, 1, sr=_sr)
             _tint_single(fig, tint, dominance)
 
         fig.update_layout(
             height=heights[key], margin=dict(l=8, r=8, t=26, b=8),
-            paper_bgcolor="#0b0f16", plot_bgcolor="#0b0f16",
-            font=dict(color="#edf3f9", size=10), showlegend=False,
+            paper_bgcolor=_c["paper"], plot_bgcolor=_c["plot"],
+            font=dict(color=_c["font"], size=10), showlegend=False,
             hovermode="x unified", dragmode="pan",
             # Keyed per chart so each figure keeps its OWN zoom across the 20s
             # rerun, and re-keyed on the window so the ➕/➖ buttons still move it.
             uirevision=f"terminal-split:{key}:{window_minutes}")
-        fig.update_xaxes(rangeslider_visible=False, gridcolor="#161b22",
-                         showspikes=True, spikecolor="#3a4757",
+        fig.update_xaxes(rangeslider_visible=False, gridcolor=_c["grid"],
+                         showspikes=True, spikecolor=_c["spike"],
                          spikethickness=1, spikemode="across",
                          spikesnap="cursor")
-        fig.update_yaxes(gridcolor="#161b22", side="right", showspikes=False)
+        fig.update_yaxes(gridcolor=_c["grid"], side="right", showspikes=False)
         if rng:
             fig.update_xaxes(range=rng, row=1, col=1)
         lo_hi = price_range(p.get("low") if p.get("low") is not None
@@ -566,7 +578,7 @@ def terminal_charts_split(nifty_df=None, call_df=None, put_df=None,
         for a in fig.layout.annotations:
             if a.text == name:
                 a.font.size = 11.5
-                a.font.color = "#cfd9e6"
+                a.font.color = _c["title"]
                 a.xanchor = "left"
         figs[key] = fig
 
@@ -624,7 +636,35 @@ def _profile_overlay(fig, profile: Dict[str, Any], row: int, col: int,
         pass
 
 
-def _leg_overlay(fig, levels, zones, row: int, col: int) -> None:
+#: A leg's S/R state → (label, colour). Same vocabulary `classify_sr_behavior`
+#: uses for the index, so one word means one thing on every panel. Colour is by
+#: what the state means for the LEG's own price, which is what its axis shows —
+#: a call leg breaking its own resistance is bullish for that call, whatever
+#: NIFTY is doing.
+SR_STATE_TONE = {
+    "BREAKING":  ("BREAKING",  "#00ff88"),
+    "BUILDING":  ("BUILDING",  "#4da6ff"),
+    "ACCEPTING": ("ACCEPTING", "#7fe8b0"),
+    "REJECTING": ("REJECTING", "#ff8c8c"),
+}
+
+
+def _sr_decoration(sr):
+    """(level key, (label, colour)) for a leg's S/R read, or (None, None).
+
+    `_leg_levels` files the behaviour level under "support" or "resistance"
+    by its side, so the key is derived the same way here — otherwise the state
+    would be written onto whichever line happened to sort first.
+    """
+    state = _s((sr or {}).get("state"))
+    tone = SR_STATE_TONE.get(state)
+    if not tone or _f((sr or {}).get("level")) is None:
+        return None, None
+    side = str((sr or {}).get("side") or "").lower()
+    return ("support" if side == "support" else "resistance"), tone
+
+
+def _leg_overlay(fig, levels, zones, row: int, col: int, sr=None) -> None:
     """One option panel's own levels and VOB zones, in premium terms.
 
     Labels sit on the **right**, which is where the trader reads them: the
@@ -641,14 +681,28 @@ def _leg_overlay(fig, levels, zones, row: int, col: int) -> None:
     turns the text back into the panel, over the empty space beside the last
     candle, and costs no chart width.
     """
+    # Which of these lines, if any, IS the S/R behaviour level. `_leg_levels`
+    # already publishes that level as "support" or "resistance" — so the state
+    # is written onto the line that is already there rather than drawn as a
+    # second line at the same price. One level, one line, one label.
+    _sr_key, _sr_tone = _sr_decoration(sr)
+
     for key, price in (levels or {}).items():
         v = _f(price)
         if v is None or key not in LEVELS:
             continue
         colour, dash, width = LEVELS[key]
+        label = f"{LEVEL_LABEL[key]} ₹{v:,.2f}"
+        if _sr_tone and key == _sr_key and _f((sr or {}).get("level")) == v:
+            # BREAKING / REJECTING / ACCEPTING / BUILDING — the verdict the
+            # engine already reached, on the level it reached it about.
+            state_label, state_colour = _sr_tone
+            label = f"{label} · {state_label}"
+            colour = state_colour
+            width = max(width, 1.6)
         fig.add_hline(y=v, row=row, col=col, line_width=width, line_dash=dash,
                       line_color=colour,
-                      annotation_text=f"{LEVEL_LABEL[key]} ₹{v:,.2f}",
+                      annotation_text=label,
                       annotation_position="right",
                       annotation=dict(xanchor="right"),
                       annotation_font=dict(size=8, color=colour))
@@ -866,8 +920,22 @@ def price_range(low, high, x=None, window=None, pad: float = Y_PAD):
     `None` when there is nothing to fit, so the caller leaves autorange alone
     rather than pinning a bogus range.
     """
-    lows = [_f(v) for v in _seq(low)]
-    highs = [_f(v) for v in _seq(high)]
+    # A zero or negative price is not a trade — no index prints one. A single
+    # such bar in the series used to define the whole axis: one `low = 0`
+    # against SENSEX at ~81,000 stretched the range to [-4860, 85865], so the
+    # candles collapsed into a thread at the top and the axis read 0 upward.
+    # NaN was already tolerated here; zero was not, and that is the shape a
+    # gap in the feed actually arrives in. Treat both as missing.
+    def _price(v):
+        """`None` unless this is a real traded price."""
+        f = _f(v)
+        return f if (f is not None and f > 0) else None
+
+    # Positions are preserved, never filtered out: the window filter below
+    # zips these against `x` by index, so dropping elements would silently
+    # misalign every bar with its timestamp.
+    lows = [_price(v) for v in _seq(low)]
+    highs = [_price(v) for v in _seq(high)]
     if not lows or not highs:
         return None
 
@@ -1019,7 +1087,7 @@ def cvd_line(cvd, low, high, share: float = 0.55):
 
 
 def _add_signal(go, fig, nifty: Optional[Dict[str, Any]],
-                signal: Optional[Dict[str, Any]]):
+                signal: Optional[Dict[str, Any]], edge: Optional[str] = None):
     """The decision state, pinned at the latest bar on the NIFTY panel."""
     s = dict(signal or {})
     state = str(s.get("state") or "").upper()
@@ -1037,7 +1105,7 @@ def _add_signal(go, fig, nifty: Optional[Dict[str, Any]],
         text=[text], textposition="top center",
         textfont=dict(size=10, color=colour),
         marker=dict(size=13, symbol=symbol, color=colour,
-                    line=dict(width=1, color="#0b0f16")),
+                    line=dict(width=1, color=edge or "#0b0f16")),
         hovertemplate=f"{text}<extra></extra>"), row=1, col=1)
 
 

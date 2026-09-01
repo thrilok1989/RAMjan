@@ -475,6 +475,12 @@ def render_dashboard_v6(state=None, db=None) -> None:
     #     _nifty_cockpit      reads   _sr_levels · _entry_decision
     #     _options_cockpit    reads   _premium_energy · _premium_structures
     #
+    # ⚔️ Level Confluence is the same dependency in miniature: it lives UNDER
+    # the charts but reads `_premium_structures`, so the charts screen claims
+    # a container for it and `render_level_confluence` fills that container
+    # after `_trading_screen` has published. Placement on screen and order of
+    # execution are separate concerns, which is the whole point of this block.
+    #
     # Filled in tab order the three cockpits ran BEFORE their producer, so:
     #   · on the first render of a session those keys did not exist and the
     #     blocks drew nothing — the "⚪ Not reporting yet: sr table / premium
@@ -489,6 +495,12 @@ def render_dashboard_v6(state=None, db=None) -> None:
         _charts_screen(st, fr)
     with tabs[4]:
         _trading_screen(st, fr, state)
+    # ⚔️ Fill the Level Confluence slot the charts screen claimed. Here, not
+    # there, because `_trading_screen` is what publishes `_premium_structures`
+    # — the HVN/LVN input. Rendering it inline on the charts screen read the
+    # previous cycle's copy, which is the fault this whole ordering exists to
+    # avoid.
+    render_level_confluence(st)
     with tabs[1]:
         _nifty_cockpit(st, fr)
     with tabs[2]:
@@ -2525,6 +2537,182 @@ def _panel_profile(st, tag, df=None, ready: Optional[Dict[str, Any]] = None):
     return profile
 
 
+def _index_label(st) -> str:
+    """Which index the chart's frame actually holds.
+
+    The panel used to be captioned "NIFTY" unconditionally, so switching the
+    instrument redrew the chart with SENSEX candles under a NIFTY title and
+    looked like nothing had happened. `_chart_instrument` is stamped by the
+    fetch that publishes the frame, so it names what is really on screen
+    rather than what is merely selected.
+    """
+    try:
+        return str(st.session_state.get("_chart_instrument") or "NIFTY")
+    except Exception:
+        return "NIFTY"
+
+
+def _leg_mfp(st, tag) -> Optional[Dict[str, Any]]:
+    """This leg's money-flow profile, from the `_atm_pm1_vpfr` legs list.
+
+    Read, never rebuilt — `_publish_atm_legs` already computed it this cycle.
+    """
+    try:
+        for leg in ((st.session_state.get("_atm_pm1_vpfr") or {})
+                    .get("legs") or []):
+            if leg.get("tag") == tag:
+                return leg.get("mfp") or None
+    except Exception:
+        pass
+    return None
+
+
+def _leg_nodes(st, tag):
+    """`(hvn, lvn)` for this leg from `_premium_structures`, keyed by
+    (side, strike) — matched the way `_leg_levels` already matches it."""
+    try:
+        for (_side, _strike), read in ((st.session_state.get(
+                "_premium_structures") or {}).items()):
+            suffix = f"{'CE' if _side == 'CALL' else 'PE'} {_strike:.0f}"
+            if str(tag).endswith(suffix):
+                return (read.get("hvn") or []), (read.get("lvn") or [])
+    except Exception:
+        pass
+    return [], []
+
+
+def _leg_contract_reads(st, tag):
+    """`(oi, depth)` for the contract behind this leg tag.
+
+    Both come off the chain's `df_summary` row for that strike — the store the
+    app already fills — so nothing is recomputed. The tag carries the strike
+    and the side ("ATM CE 24250"), which is what selects the row and column.
+
+    ⚠️ These describe the CONTRACT, not a price level on the leg's premium
+    chart. See `level_confluence.CONTRACT_LEVEL`.
+    """
+    try:
+        parts = str(tag or "").split()
+        side, strike = parts[-2].upper(), float(parts[-1])
+        ds = (st.session_state.get("_cached_option_data") or {}).get("df_summary")
+        if ds is None or getattr(ds, "empty", True) or "Strike" not in ds.columns:
+            return None, None
+        row = ds[ds["Strike"] == strike]
+        if row.empty:
+            return None, None
+        r = row.iloc[0]
+
+        def _n(col):
+            try:
+                v = r.get(col)
+                return None if v is None else float(v)
+            except Exception:
+                return None
+
+        oi = {"oi": _n(f"openInterest_{side}"),
+              "chg_oi": _n(f"changeinOpenInterest_{side}")}
+        depth = {"bid_qty": _n(f"bidQty_{side}"), "ask_qty": _n(f"askQty_{side}")}
+        return (oi if oi["chg_oi"] is not None else None,
+                depth if depth["bid_qty"] is not None else None)
+    except Exception:
+        return None, None
+
+
+def render_level_confluence(st) -> None:
+    """Fill the Level Confluence slot claimed by the charts screen.
+
+    Called AFTER `_trading_screen`, so `_premium_structures` — and therefore
+    the HVN/LVN column — is this cycle's, not last cycle's. Every other input
+    was already published before the charts drew.
+
+    Observational: reaches no gate, no verdict and no order, and recomputes
+    nothing.
+    """
+    slot = st.session_state.get("_lc_slot")
+    legs = st.session_state.get("_lc_legs")
+    if slot is None or not legs:
+        return
+    try:
+        from .level_confluence_table import build_table as _lc_table
+        payload = []
+        for leg in legs:
+            tag = leg.get("tag")
+            # Each helper runs ONCE per leg — both parse the tag and scan a
+            # frame, and calling them per-field does that work twice for the
+            # two halves of one answer.
+            oi, depth = _leg_contract_reads(st, tag)
+            hvn, lvn = _leg_nodes(st, tag)
+            payload.append({
+                "sr": _leg_store(st, "_atm_leg_sr_behavior", tag),
+                "ltp": leg.get("ltp"), "label": leg.get("label"),
+                "mfp": _leg_mfp(st, tag), "hvn": hvn, "lvn": lvn,
+                "zones": _leg_store(st, "_atm_leg_vob_volume", tag),
+                "delta": _leg_store(st, "_atm_leg_ltf_delta", tag),
+                "oi": oi, "depth": depth})
+        html = _lc_table(payload, theme=_active_theme_name(st))
+        if html:
+            with slot:
+                st.markdown(html, unsafe_allow_html=True)
+    except Exception as err:
+        _dbg_caption(st, "level_confluence", f"Level Confluence unavailable: {err}")
+
+
+def _last_close(df) -> Optional[float]:
+    """A leg's latest traded premium, or None when the frame cannot supply one.
+
+    The leg's own frame is the source: the S/R read was measured against this
+    same series, so taking the LTP from anywhere else could show a distance
+    that does not match the state beside it.
+    """
+    try:
+        if df is None or getattr(df, "empty", True):
+            return None
+        return float(df["close"].iloc[-1])
+    except Exception:
+        return None
+
+
+def _active_theme_name(st) -> str:
+    """"light" or "dark" for the viewer — the same probe the charts use, so
+    the table under them cannot end up on a different theme."""
+    try:
+        from .chart_theme import active_theme
+        return active_theme(st)
+    except Exception:
+        return "dark"
+
+
+def _chart_palette(st):
+    """The chart chrome for whatever theme this viewer has applied.
+
+    Read per render rather than cached: a viewer can switch theme from the
+    Settings menu at any time, and the charts should follow on the next rerun
+    without needing the session restarted.
+    """
+    try:
+        from .chart_theme import active_theme, palette
+        return palette(active_theme(st))
+    except Exception:
+        return None          # the renderer falls back to its dark default
+
+
+#: The index the chain, the final read and the market picture all describe.
+#: Their levels are only meaningful on this one.
+LEVELS_INDEX = "NIFTY"
+
+
+def levels_apply_to(index_label) -> bool:
+    """Whether the app's computed levels belong on a frame of `index_label`.
+
+    The levels — support/resistance, VWAP, POC, dealer levels, HTF — all come
+    off the NIFTY chain, so they describe NIFTY prices only. Drawing them on
+    another index marks prices it can never trade, and because Plotly autoscales
+    to fit every trace, a ~24,000 line under ~81,000 candles stretches the axis
+    across both and flattens the series into a thread.
+    """
+    return str(index_label or LEVELS_INDEX).upper() == LEVELS_INDEX
+
+
 def _terminal_chart(st, fr: Dict[str, Any], call_tag, put_tag, dom) -> None:
     """NIFTY ‖ ATM Call ‖ ATM Put — three figures, each with its own Fullscreen
     button, kept on one shared timeline and one zoom window so they still line
@@ -2571,6 +2759,17 @@ def _terminal_chart(st, fr: Dict[str, Any], call_tag, put_tag, dom) -> None:
     # decision (principle 12).
     levels.update(fr.get("dealer_levels") or {})
     levels["reaction"] = fr.get("reaction_level")
+    # ⚖️ Every level above is derived from the NIFTY chain, the NIFTY final
+    # read and the NIFTY market picture — those engines are deliberately
+    # NIFTY-only. Drawn on another index they mark prices it can never trade,
+    # which is the rule `_panel_profile` already states for premium legs.
+    #
+    # On SENSEX the practical damage was worse than a wrong line: hlines at
+    # ~24,000 under candles at ~81,000 made Plotly autoscale the y-axis across
+    # both, so the SENSEX series collapsed into a flat thread at the top of the
+    # panel. Withhold them, and say so rather than leaving a bare chart.
+    _idx_label_now = _index_label(st)
+    _levels_match_frame = levels_apply_to(_idx_label_now)
     # the expiry-day magnet, from the one shared rule the Trade Card uses
     try:
         from ..charm_pin import from_market_picture as _cpin
@@ -2581,6 +2780,8 @@ def _terminal_chart(st, fr: Dict[str, Any], call_tag, put_tag, dom) -> None:
     except Exception:
         pass
     htf = (fr.get("htf") or {}).get("levels") or {}
+    if not _levels_match_frame:
+        levels, htf = {}, {}
 
     window = _zoom_controls(st)
 
@@ -2588,7 +2789,14 @@ def _terminal_chart(st, fr: Dict[str, Any], call_tag, put_tag, dom) -> None:
     # bars rendered underneath it. Building them here rather than again in the
     # panel is the same rule Stage 71.8 settled for the leg reads: one profile
     # per leg, one owner, two readers.
-    _nifty_prof = _panel_profile(st, "NIFTY", nifty, mf)
+    # Tagged with the instrument, not the literal "NIFTY": `_panel_profile`
+    # caches on that tag, so a shared tag would serve one index's POC/VAH/VAL
+    # for the other. `mf` is NIFTY's prebuilt profile, so it is only handed
+    # over when the frame really is NIFTY; otherwise the profile is computed
+    # natively from this frame, which is what `_panel_profile` does with no
+    # `ready` — the same native-per-series rule it applies to the legs.
+    _nifty_prof = _panel_profile(st, _idx_label_now, nifty,
+                                 mf if _levels_match_frame else None)
     _call_prof = _panel_profile(st, ce, call_df)
     _put_prof = _panel_profile(st, pe, put_df)
     # Published for the bars below. Same cycle, so no lag — the panel reads what
@@ -2627,7 +2835,22 @@ def _terminal_chart(st, fr: Dict[str, Any], call_tag, put_tag, dom) -> None:
             nifty_profile=_nifty_prof,
             call_profile=_call_prof,
             put_profile=_put_prof,
-            price_action=bool(st.session_state.get("_apa_on", False)))
+            price_action=bool(st.session_state.get("_apa_on", False)),
+            index_label=_idx_label_now,
+            theme=_chart_palette(st),
+            # The leg S/R read the app already computes every cycle
+            # (`classify_leg_sr_behavior`) — BREAKING / REJECTING / ACCEPTING /
+            # BUILDING against the leg's own VOB structure. It reached the
+            # tables and never the chart, so the panel drew the zones and left
+            # the trader to re-derive the verdict the engine had already made.
+            call_sr=_leg_store(st, "_atm_leg_sr_behavior", ce) or {},
+            put_sr=_leg_store(st, "_atm_leg_sr_behavior", pe) or {})
+        if not _levels_match_frame:
+            st.caption(
+                f"ℹ️ Support/resistance, VWAP, POC and the dealer levels are "
+                f"computed from the NIFTY chain, so they are not drawn on "
+                f"{_idx_label_now}. The candles and the volume profile are "
+                f"{_idx_label_now}'s own.")
         # NIFTY wide on the left, the two legs stacked on the right — the same
         # 60/40 proportions the combined terminal used, so the page still reads
         # as the terminal it replaces. Each `plotly_chart` gets the shared
@@ -2645,6 +2868,48 @@ def _terminal_chart(st, fr: Dict[str, Any], call_tag, put_tag, dom) -> None:
             if figs.get("PUT") is not None:
                 st.plotly_chart(figs["PUT"], use_container_width=True,
                                 key="terminal_put", config=FS_CHART_CONFIG)
+        # 🧱 The legs' S/R read in numbers, under the panels that draw it.
+        # The chart marks the level and names the state; this says how far the
+        # leg actually is from it, which a line on a premium axis cannot show
+        # at a glance. Same values, no recomputation — the reads come from the
+        # store `_publish_atm_legs` already filled this cycle.
+        try:
+            from .leg_sr_table import build_table as _sr_table
+            # No `or {}` on the reads: a MISSING read and a read that found
+            # nothing are different answers, and collapsing them is what made
+            # "NONE" unreadable. The zone store is passed so a leg with blocks
+            # but no level can say so — the chart draws those same zones.
+            _srh = _sr_table(
+                call_sr=_leg_store(st, "_atm_leg_sr_behavior", ce),
+                put_sr=_leg_store(st, "_atm_leg_sr_behavior", pe),
+                call_ltp=_last_close(call_df), put_ltp=_last_close(put_df),
+                call_label=ce or "ATM Call", put_label=pe or "ATM Put",
+                call_zones=_leg_store(st, "_atm_leg_vob_volume", ce),
+                put_zones=_leg_store(st, "_atm_leg_vob_volume", pe),
+                theme=_active_theme_name(st))
+            if _srh:
+                st.markdown(_srh, unsafe_allow_html=True)
+        except Exception:
+            pass
+
+        # ⚔️ Level Confluence — the slot is CLAIMED here and FILLED after
+        # `_trading_screen`, which is what publishes `_premium_structures`.
+        #
+        # This screen runs first (see the dependency-order note in `render`),
+        # so a consumer of that store placed inline here reads nothing on the
+        # first render of a session and the PREVIOUS cycle's value on every
+        # render after — the exact fault that ordering was introduced to fix
+        # for the three cockpits. Claiming a container keeps the table under
+        # the charts where it belongs while letting it read fresh data.
+        try:
+            st.session_state["_lc_slot"] = st.container()
+            st.session_state["_lc_legs"] = [
+                {"tag": ce, "ltp": _last_close(call_df), "label": "CE"},
+                {"tag": pe, "ltp": _last_close(put_df), "label": "PE"},
+            ]
+        except Exception:
+            st.session_state.pop("_lc_slot", None)
+
         # 📐 Geometric patterns as a TABLE below the charts (not drawn on them),
         # each with its bias — only when the Advanced Price Action toggle is on.
         if st.session_state.get("_apa_on", False):

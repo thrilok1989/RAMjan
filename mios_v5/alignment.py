@@ -62,6 +62,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import bias_ball as _bb
+from . import leg_keys as _leg_keys
 from .bias_ball import BEAR, BULL, NEUTRAL
 
 #: the fourth state — the producer did not report. Never 0, never neutral.
@@ -525,15 +526,29 @@ def _nearest_to(prices: Sequence[float], ref: Optional[float]) -> Optional[float
 
 def _magnet_row(mp: Mapping[str, Any], ss: Mapping[str, Any],
                 spot: Optional[float]) -> Dict[str, Any]:
-    """Charm pin / dealer magnet, via `charm_pin` — which already owns the pin
-    CHOICE (OI pin first, max pain second) and the drift wording."""
+    """Charm pin / dealer magnet, via `dealer_magnet` — which owns the read on
+    EVERY day and delegates the pin choice to `charm_pin`.
+
+    ⚠️ Not `charm_pin` directly. That module opens with
+    `if not is_expiry_day: return {"active": False, "reason": "not expiry day"}`
+    — deliberately, it is the expiry-day charm read — and `dealer_magnet` exists
+    precisely because the magnet itself is useful on the other four days too.
+    Calling the expiry-only module meant this row reported ❓ for most of every
+    week.
+
+    Max pain is read from the option chain, which is the only place it is
+    published (`analyze_option_chain` → `max_pain_strike`). The Market Picture
+    carries `oi_pin` but has no `max_pain` key, so passing `mp.get("max_pain")`
+    silently handed the pin chooser None and left it with one candidate instead
+    of two.
+    """
+    max_pain = _f(_map(ss.get("_cached_option_data")).get("max_pain_strike"))
     try:
-        from .charm_pin import from_market_picture as _pin
-        read = _pin(bool(ss.get("_is_expiry_today")), spot, mp,
-                    mp.get("max_pain")) or {}
+        from .dealer_magnet import from_market_picture as _pin
+        read = _pin(bool(ss.get("_is_expiry_today")), spot, mp, max_pain) or {}
     except Exception:
         read = {}
-    pin = _f(read.get("pin")) or _f(_first(mp.get("oi_pin")))
+    pin = _f(read.get("pin")) or _f(_first(mp.get("oi_pin"))) or max_pain
     if pin is None or spot is None:
         return _na_row(STRUCTURE, B_DEALERS, "Charm Pin / Magnet",
                        str(read.get("reason") or "no pin strike available"))
@@ -551,6 +566,30 @@ def _magnet_row(mp: Mapping[str, Any], ss: Mapping[str, Any],
                 + (" · expiry" if read.get("expiry") else ""))
 
 
+def _prefer_align(preferred: Optional[str], ce_e: Optional[float],
+                  pe_e: Optional[float]) -> str:
+    """Stage 71.7's premium preference → a NIFTY direction.
+
+    `preferred` is one of `premium_energy`'s four words. CALL and PUT map to
+    bull and bear; "No Edge" and "Avoid Both" are a decision not to call it, and
+    are honoured as neutral rather than second-guessed by the raw scores.
+
+    With no verdict at all, the two energy scores decide — that is the only
+    case where this compares them.
+    """
+    word = str(preferred or "").upper()
+    if "CALL" in word:
+        return BULL
+    if "PUT" in word:
+        return BEAR
+    if word:                       # "No Edge" / "Avoid Both" — a real answer
+        return NEUTRAL
+    if ce_e is None and pe_e is None:
+        return NEUTRAL
+    ce, pe = (ce_e or 0.0), (pe_e or 0.0)
+    return BULL if ce > pe else BEAR if pe > ce else NEUTRAL
+
+
 def _premium(ss: Mapping[str, Any], zones: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
     """The option side: energy, each leg's own S/R and HVP lines, and the two
     premiums themselves — all measured on the LEG's axis, never the index's.
@@ -561,10 +600,29 @@ def _premium(ss: Mapping[str, Any], zones: Sequence[Mapping[str, Any]]) -> List[
     rows: List[Dict[str, Any]] = []
 
     pe_energy = _map(ss.get("_premium_energy"))
-    score = _map(pe_energy.get("energy_score"))
+    # ⚠️ `energy_score` lives on the BRIDGE, not at the top level.
+    #
+    # Stage 71.7 publishes its nine downstream fields under `["bridge"]`
+    # (`premium_energy.BRIDGE_KEYS`) precisely so a consumer reads one flat
+    # contract instead of walking `sides["CALL"]["energy"]`. Reading
+    # `_premium_energy["energy_score"]` finds nothing on every cycle — which is
+    # what made this row report "not published" while the panel beside it drew
+    # the numbers. `sides` is the fallback, so a future reshuffle of the bridge
+    # degrades this row rather than blanking it.
+    bridge = _map(pe_energy.get("bridge"))
+    score = _map(bridge.get("energy_score")) or _map(pe_energy.get("energy_score"))
     ce_e, pe_e = _f(score.get("CALL")), _f(score.get("PUT"))
+    if ce_e is None and pe_e is None:
+        sides = _map(pe_energy.get("sides"))
+        ce_e = _f(_map(sides.get("CALL")).get("energy"))
+        pe_e = _f(_map(sides.get("PUT")).get("energy"))
     if ce_e is not None or pe_e is not None:
-        bias = _label(pe_energy.get("premium_bias"))
+        # The engine's own verdict — "Prefer CALL" / "Prefer PUT" / "No Edge" —
+        # which is a preference between premiums, not a NIFTY direction: a
+        # preferred CALL is bullish, a preferred PUT bearish.
+        bias = (bridge.get("preferred_premium")
+                or _map(pe_energy.get("preferred")).get("preferred"))
+        bias = str(bias) if bias else None
         rows.append(_row(
             PREMIUM, B_OPTIONS, "Premium Energy",
             f"CE {ce_e:.0f} / PE {pe_e:.0f}" if ce_e is not None and pe_e is not None
@@ -572,21 +630,63 @@ def _premium(ss: Mapping[str, Any], zones: Sequence[Mapping[str, Any]]) -> List[
             ("⚡ CALL loaded" if (ce_e or 0) > (pe_e or 0) else
              "⚡ PUT loaded" if (pe_e or 0) > (ce_e or 0) else "⚖️ balanced"),
             # More energy on the CALL side is participation in upside; on the
-            # PUT side, downside. The published `premium_bias` wins when it is
-            # there, because it is the engine's own verdict.
-            _bb.direction_bias(bias) if bias else
-            (BULL if (ce_e or 0) > (pe_e or 0) else
-             BEAR if (pe_e or 0) > (ce_e or 0) else NEUTRAL),
+            # PUT side, downside. The engine's own `preferred` verdict wins when
+            # it is there.
+            #
+            # ⚠️ NOT `direction_bias`: that reads BULL/BEAR/UP/DOWN words, and
+            # Stage 71.7 speaks in "Prefer CALL" / "Prefer PUT" / "No Edge" /
+            # "Avoid Both" — none of which it recognises, so every row came back
+            # neutral. A preferred CALL premium is bullish for the index and a
+            # preferred PUT bearish; "No Edge" and "Avoid Both" are genuinely
+            # neither and must stay neutral rather than falling through to the
+            # score comparison, which would overrule the engine that just
+            # declined to call it.
+            _prefer_align(bias, ce_e, pe_e),
             bias or "which side is carrying the participation"))
     else:
         rows.append(_na_row(PREMIUM, B_OPTIONS, "Premium Energy",
                             "Stage 71.7 energy not published"))
 
     profiles = _map(ss.get("_leg_profiles"))
-    labels = {"PUT": profiles.get("put_label"),
-              "CALL": profiles.get("call_label")}
     vob = _map(ss.get("_atm_leg_vob_volume"))
     ltps = _map(ss.get("_atm_leg_ltp"))
+
+    # ⚠️ The leg NAME is resolved from the stores that hold the data, not from
+    # `_leg_profiles`.
+    #
+    # This is the bug that emptied the whole section. `_atm_leg_ltp` and
+    # `_atm_leg_vob_volume` are filled at step 7, before the MIOS pass;
+    # `_leg_profiles` — and with it `call_label` / `put_label` — is published
+    # later, by the charts tab inside Dashboard V6. Taking the name from the
+    # late producer meant that whenever it had not published, every option row
+    # said "not published this cycle" while the premiums and their zones sat in
+    # session state the whole time.
+    #
+    # `leg_keys` owns the "exact ATM wins, nearest offset falls back" rule, so
+    # this picks the same leg the terminal charts do. The published labels are
+    # still preferred when present — if the charts resolved a leg, this table
+    # must describe that leg and not a different one.
+    # The union of both stores, because a leg can have a premium without VOB
+    # zones (too few bars to form one) and the row set should not shrink for it.
+    _keys = set(ltps) | set(vob) | set(_map(ss.get("_atm_leg_dfs")))
+    _resolved = dict(zip(("CALL", "PUT"), _leg_keys.call_put(_keys)))
+
+    def _leg_label(chart: str) -> Optional[str]:
+        """The published label when it still names a live leg, else the one
+        resolved from the stores.
+
+        The `in _keys` test is the point. The ATM strike drifts through the
+        session and the stores are rebuilt each cycle around the new one, so a
+        label held over from an earlier cycle can name a strike that is no
+        longer loaded — and preferring it blindly reproduces the empty section
+        it was supposed to fix, only intermittently and around the drift.
+        """
+        published = profiles.get(f"{chart.lower()}_label")
+        if published and str(published) in _keys:
+            return str(published)
+        return _resolved.get(chart)
+
+    labels = {"PUT": _leg_label("PUT"), "CALL": _leg_label("CALL")}
 
     for chart in ("PUT", "CALL"):
         name = labels.get(chart)
@@ -637,8 +737,13 @@ def _premium(ss: Mapping[str, Any], zones: Sequence[Mapping[str, Any]]) -> List[
             check = f"{chart} HVP {side}"
             pts = _hv_prices(prof, side)
             if not pts or ltp is None:
-                rows.append(_na_row(PREMIUM, B_OPTIONS, check,
-                                    "no high-volume pivots on this leg"))
+                # ⚠️ Say which half is missing. Blaming the pivots for an absent
+                # premium sent me looking at `volume_points` for a fault that
+                # was one store away — and would send the next reader there too.
+                rows.append(_na_row(
+                    PREMIUM, B_OPTIONS, check,
+                    "no high-volume pivots on this leg's frame" if ltp is not None
+                    else "no leg premium published — cannot place the lines"))
                 continue
             nearest = _nearest_to(pts, ltp)
             gap = abs((nearest or 0) - ltp)

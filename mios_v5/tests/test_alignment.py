@@ -70,8 +70,11 @@ def _ss(**over):
             "ATM PE 24400": [{"zone_type": "bullish", "mid": 110.0,
                               "status": "BUILDING", "dominant": "buyers",
                               "bull_pct": 72}]},
-        "_premium_energy": {"energy_score": {"CALL": 42.0, "PUT": 78.0},
-                            "premium_bias": "BEARISH"},
+        # the real shape: Stage 71.7 publishes its downstream contract under
+        # ["bridge"] (premium_energy.BRIDGE_KEYS), not at the top level
+        "_premium_energy": {"bridge": {"energy_score": {"CALL": 42.0, "PUT": 78.0},
+                                       "preferred_premium": "Prefer PUT"}},
+        "_cached_option_data": {"max_pain_strike": 24400.0},
     }
     ss.update(over)
     return ss
@@ -373,3 +376,137 @@ def test_the_why_line_quotes_evidence_not_a_dash():
     for phrase in s["why"] + s["conflicts"]:
         assert "— —" not in phrase
         assert not phrase.endswith("—")
+
+
+# ── 7 · the four key-path bugs that emptied the OPTION PREMIUM section ───────
+#
+# Every one of these shipped green: the rows rendered, said "not published",
+# and were wrong. A test that only asserts "a row exists" cannot catch a lookup
+# into a key nobody writes — so each of these pins the path to its real owner.
+
+def test_premium_energy_is_read_off_the_bridge():
+    """Stage 71.7 publishes `energy_score` under ["bridge"], its declared
+    downstream contract. Reading it at the top level finds nothing on every
+    cycle, which is what made this row say "not published" beside a panel
+    drawing the same numbers."""
+    from mios_v5 import premium_energy as PE
+    assert "energy_score" in PE.BRIDGE_KEYS
+    row = _by_check(A.build(_ss()), "Premium Energy")
+    assert row["align"] != A.NA
+    assert "42" in row["value"] and "78" in row["value"]
+
+
+def test_premium_energy_falls_back_to_the_side_scores():
+    """If the bridge is ever reshaped, the row degrades to the internal shape
+    rather than blanking."""
+    read = A.build(_ss(_premium_energy={
+        "sides": {"CALL": {"energy": 60.0}, "PUT": {"energy": 20.0}}}))
+    row = _by_check(read, "Premium Energy")
+    assert row["align"] == BB.BULL
+
+
+@pytest.mark.parametrize("preferred,expected", [
+    ("Prefer CALL", BB.BULL),
+    ("Prefer PUT", BB.BEAR),
+    # the engine declining to call it is an answer, not a gap to fill from the
+    # raw scores — which would overrule the stage that just abstained
+    ("No Edge", BB.NEUTRAL),
+    ("Avoid Both", BB.NEUTRAL),
+    (None, BB.BEAR),          # no verdict → the scores decide (PUT 78 > CE 42)
+])
+def test_the_premium_preference_maps_to_a_nifty_direction(preferred, expected):
+    assert A._prefer_align(preferred, 42.0, 78.0) == expected
+
+
+def test_direction_bias_would_not_have_understood_the_preference():
+    """Guards the reason `_prefer_align` exists: bias_ball reads BULL/BEAR/UP/
+    DOWN words and has never seen "Prefer CALL", so routing the preference
+    through it returned neutral for every cycle."""
+    assert BB.direction_bias("Prefer CALL") == BB.NEUTRAL
+    assert A._prefer_align("Prefer CALL", None, None) == BB.BULL
+
+
+def test_the_leg_name_comes_from_the_store_that_holds_the_data():
+    """The cascade: `_atm_leg_ltp` / `_atm_leg_vob_volume` are filled at step 7,
+    `_leg_profiles` (and its labels) only later by the charts tab. Taking the
+    name from the late producer emptied every option row whenever it had not
+    published — while the premiums sat in session state throughout."""
+    ss = _ss()
+    ss.pop("_leg_profiles")
+    read = A.build(ss)
+    assert _by_check(read, "CALL LTP Price")["value"] == "₹95.00"
+    assert _by_check(read, "PUT LTP Support")["align"] == BB.BEAR
+
+
+def test_a_stale_published_label_is_not_preferred_over_a_live_leg():
+    """The ATM strike drifts and the stores are rebuilt around the new one, so
+    a label held over from an earlier cycle can name a strike no longer loaded.
+    Preferring it blindly reproduces the empty section around the drift."""
+    read = A.build(_ss(_leg_profiles={"call_label": "ATM CE 24300",
+                                      "put_label": "ATM PE 24300"}))
+    assert _by_check(read, "CALL LTP Price")["value"] == "₹95.00"
+
+
+def test_the_published_label_wins_when_it_names_a_live_leg():
+    """When the charts did resolve a leg, this table must describe that leg —
+    not a different one it picked itself."""
+    ss = _ss()
+    ss["_atm_leg_ltp"] = {"ATM CE 24400": 95.0, "ATM+1 CE 24450": 60.0,
+                          "ATM PE 24400": 110.0}
+    ss["_leg_profiles"] = dict(ss["_leg_profiles"],
+                               call_label="ATM+1 CE 24450")
+    assert _by_check(A.build(ss), "CALL LTP Price")["value"] == "₹60.00"
+
+
+def test_the_leg_key_rule_has_one_owner():
+    """`terminal_chart.atm_legs` and this module must pick the same leg. The
+    rule is about key names, so it lives in `leg_keys` and both call it."""
+    from mios_v5 import leg_keys as LK
+    from mios_v5.ui import terminal_chart as TC
+    keys = ["ATM+1 CE 24450", "ATM CE 24400", "ATM PE 24400", "sid_9999"]
+    assert LK.call_put(keys) == ("ATM CE 24400", "ATM PE 24400")
+    # the chart helper delegates rather than keeping a second copy
+    assert "_call_put" in pathlib.Path(TC.__file__).read_text()
+    _, _, ce, pe = TC.atm_legs({k: object() for k in keys})
+    assert (ce, pe) == LK.call_put(keys)
+
+
+def test_security_id_mirrors_are_never_mistaken_for_a_leg():
+    """Several stores hold each leg twice — once by name, once by `sid_…`. A
+    security id is not a leg name."""
+    from mios_v5 import leg_keys as LK
+    assert LK.pick(["sid_54321"], "CE") is None
+
+
+def test_the_magnet_reports_on_a_non_expiry_day():
+    """`charm_pin` returns {"active": False, "reason": "not expiry day"} by
+    design — it is the expiry-day charm read. `dealer_magnet` exists because
+    the magnet itself matters on the other four days, and calling the wrong one
+    made this row ❓ for most of every week."""
+    from mios_v5 import charm_pin as CP
+    assert CP.read(False, 24380.0, 24400.0).get("active") is False
+    row = _by_check(A.build(_ss(_is_expiry_today=False)), "Charm Pin / Magnet")
+    assert row["align"] != A.NA
+    assert "24,400" in row["position"]
+
+
+def test_max_pain_is_read_from_the_option_chain():
+    """`_market_picture` has no `max_pain` key — `analyze_option_chain`
+    publishes `max_pain_strike`. Passing mp.get("max_pain") handed the pin
+    chooser None and left it one candidate instead of two."""
+    ss = _ss()
+    ss["_market_picture"] = dict(ss["_market_picture"], oi_pin=None)
+    row = _by_check(A.build(ss), "Charm Pin / Magnet")
+    assert row["align"] != A.NA, "max pain should still supply the magnet"
+    assert "24,400" in row["value"]
+
+
+def test_a_missing_leg_premium_does_not_blame_the_pivots():
+    """The HVP row used to report "no high-volume pivots on this leg" when the
+    premium was the missing half — sending a reader to `volume_points` for a
+    fault one store away."""
+    ss = _ss()
+    ss["_atm_leg_ltp"] = {}
+    row = _by_check(A.build(ss), "PUT HVP HIGH")
+    assert "premium" in row["remark"]
+    assert "no high-volume pivots" not in row["remark"]

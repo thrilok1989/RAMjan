@@ -368,11 +368,39 @@ def _na_row(group: str, bucket: str, check: str, why: str) -> Dict[str, Any]:
 def _level_row(group: str, bucket: str, check: str, level: Optional[float],
                spot: Optional[float], zones: Sequence[Mapping[str, Any]],
                chart: str, role: str, remark: str = "",
-               missing: str = "not published this cycle") -> Dict[str, Any]:
-    """One S/R-shaped row: a price, what spot is doing at it, what that means."""
+               missing: str = "not published this cycle",
+               structural: bool = False) -> Dict[str, Any]:
+    """One S/R-shaped row: a price, what spot is doing at it, what that means.
+
+    `structural` drops the far-gate for levels whose meaning is POSITIONAL
+    rather than interactional — the OI walls. A wall is where the writers are:
+    a PE wall below spot is a floor beneath the market and a CE wall above is a
+    cap over it, and that is as true eighty points away as it is at six. Gating
+    it on proximity reported ⚪ for a wall that was plainly doing its job.
+
+    Every other level keeps the gate, because an untested S/R line price is
+    nowhere near genuinely is not saying anything about direction yet.
+    """
     if level is None:
         return _na_row(group, bucket, check, missing)
     text, holding, observed = _interaction(level, spot, zones, role)
+    if structural and holding is None and level is not None and spot is not None:
+        # Only the FAR case is recovered. Price sitting on the wall is a live
+        # contest and stays undecided — that is the one distance at which a
+        # wall genuinely has not said which way it goes.
+        if abs(spot - level) > AT_BAND:
+            above = spot > level
+            holding = _holding(role, (ABOVE, above))
+            # ⚠️ Re-word as well as re-score. "⚪ Far from ₹24,300" beside a
+            # 🟢 Bull is a contradiction on one line — the neutral glyph says
+            # the row abstained and the alignment says it did not. Say what the
+            # wall IS from here instead, which is the thing that votes.
+            d = spot - level
+            noun = ("floor" if _is_support(role) else "cap") if holding \
+                else ("floor lost" if _is_support(role) else "cap cleared")
+            icon = BALLS.get(_level_align(chart, role, holding), "⚪")
+            text = (f"{icon} {noun.capitalize()} {_rupees(level)} "
+                    f"({'above' if d < 0 else 'below'} spot, {abs(d):,.0f} pts)")
     return _row(group, bucket, check, _rupees(level), text,
                 _level_align(chart, role, holding), remark, observed)
 
@@ -399,11 +427,11 @@ def _structure(ss: Mapping[str, Any], mp: Mapping[str, Any], spot: Optional[floa
     rows.append(_level_row(STRUCTURE, B_STRUCTURE, "PUT Wall OI",
                            _f(_first(mp.get("oi_floor"))), spot, zones,
                            "NIFTY", "support", "PE writers' floor",
-                           "no PE wall ranked"))
+                           "no PE wall ranked", structural=True))
     rows.append(_level_row(STRUCTURE, B_STRUCTURE, "CALL Wall OI",
                            _f(_first(mp.get("oi_ceiling"))), spot, zones,
                            "NIFTY", "resistance", "CE writers' cap",
-                           "no CE wall ranked"))
+                           "no CE wall ranked", structural=True))
 
     # Canonical S/R — the one support and one resistance every screen shares.
     rsr = _map(ss.get("_reaction_sr"))
@@ -579,18 +607,27 @@ def _leg_bands(ltp: float) -> Tuple[float, float]:
     """`(at, near)` for a leg, as a fraction of its own premium.
 
     Index points cannot be reused here: ₹5 is a touch on a ₹300 leg and a
-    different world on a ₹20 one. The floors keep a near-worthless expiry-day
+    different world on a ₹20 one. The floor keeps a near-worthless expiry-day
     leg from having a band of nothing.
 
-    ⚠️ The near band is 5% of the premium, not the 2% it started at. Two per
-    cent of an option is about one minute's movement — a ₹100 leg travels ₹2
-    without anything happening — so nearly every pivot and zone fell outside it
-    and abstained, and the summary filled up with ⚪ from rows that had a
-    perfectly good read. Five per cent is still a tight window, and still
-    excludes by a wide margin the case this gate exists for: a ₹5.75 leg
-    carrying a stale zone at ₹84.
+    ⚠️ The near band is HALF the premium, and that is deliberate rather than
+    sloppy. It has been 2% and then 5%, and both were wrong for the same
+    reason: they are index-trader intuitions about distance applied to a
+    leveraged instrument. An option premium routinely travels tens of per cent
+    in a session — a call at ₹5.75 reaching ₹7.50 is a thirty per cent move and
+    an ordinary morning — so a 5% band called that pivot "far" and abstained on
+    a level sitting right on top of the premium.
+
+    The gate's job is NOT to be a tight interaction band. It exists to exclude
+    levels the premium **cannot reach** — the stale zone at ₹84 that the same
+    ₹5.75 call was still voting on. Fifty per cent does that job with a wide
+    margin (₹84 is 1,361% away) while letting the levels actually in front of
+    the premium report.
     """
-    return max(ltp * 0.005, 0.25), max(ltp * 0.05, 0.5)
+    at = max(ltp * 0.005, 0.25)
+    # `at * 2` keeps the two bands ordered on a leg worth a few paise, where the
+    # floor would otherwise put the "at" band outside the "near" one.
+    return at, max(ltp * 0.50, at * 2)
 
 
 def _distance_word(price: float, level: float, at: float, near: float

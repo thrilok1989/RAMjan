@@ -12,6 +12,8 @@ import json
 import hashlib
 import numpy as np
 import math
+from mios_v5.index_option_specs import (
+    INDEX_OPTION_SPECS, index_option_segment, option_spec)
 from scipy.stats import norm
 from pytz import timezone
 import io
@@ -180,6 +182,50 @@ NIFTY_UNDERLYING_SCRIP = 13
 NIFTY_UNDERLYING_SEG = "IDX_I"
 
 
+# ── Instrument Registry: discover specs from Dhan (not hardcoded) ────────
+# Initialize on first render; cache in session_state for reuse.
+def _get_instrument_context(session_state, selected_instrument: str = "NIFTY"):
+    """Get normalized instrument context (specs from Dhan)."""
+    cache_key = f"_instrument_context_{selected_instrument}"
+
+    if cache_key in session_state:
+        return session_state[cache_key]
+
+    try:
+        from mios_v5.instrument_registry import create_instrument_registry
+        registry = create_instrument_registry(dhan)
+
+        if selected_instrument == "SENSEX":
+            ctx = registry.discover_sensex()
+        else:
+            ctx = registry.discover_nifty()
+
+        if ctx:
+            session_state[cache_key] = ctx
+            return ctx
+    except Exception as e:
+        import logging
+        logging.error(f"Failed to discover {selected_instrument} specs: {e}")
+
+    # Fallback to hardcoded NIFTY if discovery fails
+    if selected_instrument == "NIFTY":
+        from mios_v5.instrument_registry import InstrumentContext
+        fallback = InstrumentContext(
+            symbol="NIFTY",
+            security_id=13,
+            exchange_segment="IDX_I",
+            contract_multiplier=25.0,
+            strike_step=100,
+            current_expiry="2026-08-27",
+            expiry_list=["2026-08-27", "2026-09-24"],
+            atm_range=100,
+            lot_size=1,
+            tick_size=0.05,
+        )
+        session_state[cache_key] = fallback
+        return fallback
+
+    return None
 
 
 
@@ -705,7 +751,8 @@ FORMATION_ALERTS_DEFAULT = True
 # Telegram when an option LTP (call or put) comes within ±5 of one of ITS OWN
 # high-volume-point lines. Latched per line + a cooldown ("sleep") so a price
 # loitering at the line does not repeat. Reuses `mios_v5.level_touch`.
-LEG_HVP_TOUCH_DEFAULT = True
+# OFF by default — opt in via the sidebar.
+LEG_HVP_TOUCH_DEFAULT = False
 LEG_HVP_BAND = 5.0            # ±5 points of the LTP, as asked
 LEG_HVP_COOLDOWN_S = 900.0    # the "sleeping facility" — 15 min per line
 
@@ -715,6 +762,10 @@ LEG_HVP_COOLDOWN_S = 900.0    # the "sleeping facility" — 15 min per line
 #    at is alerted once, not every 20-second refresh — see
 #    `mios_v5.level_touch.evaluate` and `_notify_level_touches`.
 LEVEL_TOUCH_DEFAULT = True
+
+#: Default for the flow-at-level alert to the ALTERNATE bot (PUT heavier at
+#: resistance · CALL heavier at support). On, because the owner asked for it.
+FLOW_LEVEL_ALERTS_DEFAULT = True
 
 # ── Level Acceptance / Rejection alerts ────────────────────────────────
 # Telegram note when a level RESOLVES (accepted above/below, or rejected) — the
@@ -731,6 +782,14 @@ LEVEL_ACCEPT_COOLDOWN_S = 900.0
 # no new engine. Latched per setup + cooldown so it fires once, not every cycle.
 CONFLUENCE_ALERTS_DEFAULT = True
 CONFLUENCE_COOLDOWN_S = 900.0
+
+# ── ⚠️ Entry reversal alert — PAUSED by the owner ──────────────────────
+# The whipsaw alert repeated the same level over and over (the same ₹ level five
+# times in a row, only the "Current" price moving), so the owner asked for it to
+# stop. OFF by default; the sidebar box brings it back. The alert body is
+# unchanged and still gated — nothing was deleted.
+ENTRY_REVERSED_ALERT_DEFAULT = False
+ENTRY_REVERSED_COOLDOWN_S = 300.0
 
 # ── the two sub-alerts the owner paused ────────────────────────────────
 # The ranked support/resistance TOUCH (a sub-alert of level-touch) and the VOB
@@ -991,6 +1050,26 @@ def send_telegram_alert_bot(message):
             st.session_state['_alert_bot_last_error'] = str(e)
             _time.sleep(1 + _attempt)
     return None
+
+
+def send_formation_alert(message):
+    """📐 Formation notes (new HVP / VOB) → the SECOND Telegram account.
+
+    The owner asked for these off the main bot. Only the Telegram destination
+    moved: Discord still gets its copy exactly as before, and the seed/diff
+    anti-spam rule in `_notify_chart_formations` is untouched.
+
+    When the alert bot is unconfigured the main bot carries it — a message the
+    owner asked for should not vanish because a secret is missing. In that case
+    `send_telegram_message_sync` posts to Discord itself, so this does not.
+    """
+    if not TELEGRAM_ALERT_BOT_TOKEN or not TELEGRAM_ALERT_CHAT_ID:
+        return send_telegram_message_sync(message, force=True)
+    try:
+        send_discord_message(message, force=True)
+    except Exception:
+        pass
+    return send_telegram_alert_bot(message)
 
 
 def _mios_market_read():
@@ -1358,6 +1437,26 @@ class DhanAPI:
         _back = st.session_state.get('_dhan_429_until')
         if _back and datetime.now(ist) < _back:
             return None
+        # ── one identical request per render, whoever asks ──────────────
+        # Callers each hold their own cache (the legs, the wings, the CVD
+        # history), but the two index fetches held none, so the same request
+        # could be issued twice in a cycle. It happens for real: the chart
+        # frame asks for `interval` over `days_back`, and the 5-minute frame
+        # asks for "5" over `max(days_back, 3)` — pick "5 min" on the timeframe
+        # selector with Days at 3 or more and those are byte-identical.
+        #
+        # Keyed by the render sequence, so a later render still refetches and
+        # the still-forming candle keeps updating; within one render the answer
+        # cannot have changed anyway, since it is a single instant.
+        _memo_key = (str(security_id), str(exchange_segment), str(instrument),
+                     str(interval), int(days_back))
+        _rid = st.session_state.get('_render_seq')
+        _memo = st.session_state.get('_intraday_memo')
+        if _memo is None or _memo.get('render') != _rid:
+            _memo = {'render': _rid, 'by_key': {}}
+            st.session_state['_intraday_memo'] = _memo
+        if _memo_key in _memo['by_key']:
+            return _memo['by_key'][_memo_key]
         # Throttle: enforce a minimum gap between intraday calls so the legs
         # don't burst past Dhan's per-second limit.
         try:
@@ -1383,7 +1482,14 @@ class DhanAPI:
         }
         try:
             response = requests.post(url, headers=self.headers, json=payload)
-            return self._handle_response(response)
+            out = self._handle_response(response)
+            # Only a real answer is memoised. Caching a None would make one
+            # failed fetch look like "no data" to every other caller this
+            # render, which is the failure mode the expiry-list cache
+            # documents — and each caller has its own fallback to reach for.
+            if out:
+                _memo['by_key'][_memo_key] = out
+            return out
         except Exception as e:
             st.error(f"Error fetching data: {str(e)}")
             return None
@@ -1522,6 +1628,7 @@ class DhanAPI:
         url = f"{self.base_url}/marketfeed/quote"
         payload = {exchange_segment: [int(security_id)]}
         try:
+            _quote_gate(url)
             response = requests.post(url, headers=self.headers, json=payload, timeout=10)
             if response.status_code == 401:
                 st.session_state['_dhan_token_expired'] = True
@@ -1546,6 +1653,7 @@ class DhanAPI:
         # Returns just last_price (no OI/volume) but at least lets us compute basis.
         try:
             ltp_url = f"{self.base_url}/marketfeed/ltp"
+            _quote_gate(ltp_url)
             ltp_resp = requests.post(ltp_url, headers=self.headers, json=payload, timeout=10)
             if ltp_resp.status_code == 200:
                 items = ltp_resp.json().get('data', {}).get(exchange_segment, {})
@@ -1595,10 +1703,34 @@ def get_dhan_expiry_list_cached(underlying_scrip: int, underlying_seg: str):
         return cached['data']
     return fresh
 
+#: Dhan caps Quote APIs — `marketfeed/ltp` and `marketfeed/quote` — at 1
+#: request per SECOND, the tightest per-second limit in the whole API. The
+#: intraday endpoint has had a 0.3s gate since the legs started bursting; the
+#: quote endpoints had none, despite a stricter limit and several callers.
+QUOTE_MIN_GAP_S = 1.05          # a hair over 1s, so rounding cannot trip it
+
+
+def _quote_gate(url):
+    """Space consecutive Quote-API calls to stay inside Dhan's 1/second cap."""
+    if 'marketfeed' not in str(url):
+        return
+    try:
+        last = st.session_state.get('_dhan_last_quote_ts')
+        now = time.time()
+        if last is not None:
+            gap = now - last
+            if gap < QUOTE_MIN_GAP_S:
+                time.sleep(QUOTE_MIN_GAP_S - gap)
+        st.session_state['_dhan_last_quote_ts'] = time.time()
+    except Exception:
+        pass
+
+
 def _dhan_post(url, payload, max_retries=4):
     if not DHAN_CLIENT_ID or not DHAN_ACCESS_TOKEN:
         st.error("Dhan API credentials not configured")
         return None
+    _quote_gate(url)
     headers = {'access-token': DHAN_ACCESS_TOKEN, 'client-id': DHAN_CLIENT_ID, 'Content-Type': 'application/json'}
     # ── retry budget, bounded by the refresh cycle ──
     # These were [2, 4, 8, 16]: a fully rate-limited chain fetch slept for 30
@@ -1686,10 +1818,58 @@ def _dhan_post(url, payload, max_retries=4):
             return None
     return None
 
-def get_dhan_option_chain(underlying_scrip: int, underlying_seg: str, expiry: str, max_retries: int = 4):
-    return _dhan_post("https://api.dhan.co/v2/optionchain",
+#: Dhan documents the option chain separately from every other Data API:
+#: "Rate limit for Option Chain API is set to one unique request every 3
+#: seconds", because OI updates far slower than LTP. It is the strictest limit
+#: the app touches and was the only fetch with no throttle at all — the intraday
+#: endpoint has had a 0.3s gap for ages while this one fired in a tight loop.
+OPTION_CHAIN_MIN_GAP_S = 3.0
+
+#: Long enough that one render never fetches the same chain twice, short enough
+#: that the next render (~20s later) still gets a fresh one. The nearest expiry
+#: was being fetched twice per cycle — once for the main read, once as the first
+#: entry of the cross-expiry loop — because this function had no cache at all.
+OPTION_CHAIN_TTL_S = 10.0
+
+
+def get_dhan_option_chain(underlying_scrip: int, underlying_seg: str, expiry: str,
+                          max_retries: int = 4, allow_wait: bool = True):
+    """One option chain, cached per (scrip, seg, expiry) and rate-gated.
+
+    Returns the cached payload when it is younger than `OPTION_CHAIN_TTL_S`, so
+    two callers asking for the same expiry in one render cost one request.
+
+    Otherwise it waits out the remainder of Dhan's 3s window before calling.
+    `allow_wait=False` makes it give up instead of sleeping — for callers that
+    would rather skip an expiry than spend the render's budget waiting.
+    """
+    key = f"{underlying_scrip}|{underlying_seg}|{expiry}"
+    store = st.session_state.setdefault('_option_chain_cache', {})
+    hit = store.get(key)
+    now = time.time()
+    if hit and (now - hit['ts']) < OPTION_CHAIN_TTL_S:
+        return hit['data']
+
+    # Space DISTINCT requests. The window is global to the endpoint, not
+    # per-expiry, so it is tracked on one timestamp rather than per key.
+    last = st.session_state.get('_option_chain_last_ts')
+    if last is not None:
+        wait = OPTION_CHAIN_MIN_GAP_S - (now - last)
+        if wait > 0:
+            if not allow_wait:
+                return hit['data'] if hit else None
+            time.sleep(min(wait, OPTION_CHAIN_MIN_GAP_S))
+
+    st.session_state['_option_chain_last_ts'] = time.time()
+    resp = _dhan_post("https://api.dhan.co/v2/optionchain",
                       {"UnderlyingScrip": underlying_scrip, "UnderlyingSeg": underlying_seg, "Expiry": expiry},
                       max_retries)
+    # Only a real answer replaces the cache — a failed fetch must not blank a
+    # good chain, which is the mistake the expiry-list cache documents above.
+    if resp:
+        store[key] = {'ts': time.time(), 'data': resp}
+        return resp
+    return hit['data'] if hit else None
 
 
 @st.cache_resource(show_spinner=False)
@@ -1746,8 +1926,17 @@ def get_index_spot_ltp(scrip: int = NIFTY_UNDERLYING_SCRIP, seg: str = NIFTY_UND
             return None
         _ck = f'_idx_spot_ltp_{scrip}_{seg}'
         _cached = st.session_state.get(_ck)
-        if _cached and (_now - _cached['ts']).total_seconds() < 4:
-            return _cached['ltp']
+        # Scoped to the render, not to a stopwatch. A 4s TTL was shorter than a
+        # render — the legs alone spend 0.3s apiece under their fetch gate — so
+        # the four call sites spread through a cycle kept missing it and
+        # re-fetching the same spot, on an endpoint Dhan caps at 1 request per
+        # second. Once per render per (scrip, seg) is what this is worth; the
+        # 4s floor still applies across renders so a fast rerun cannot burst.
+        _rid = st.session_state.get('_render_seq')
+        if _cached:
+            _same_render = _rid is not None and _cached.get('render') == _rid
+            if _same_render or (_now - _cached['ts']).total_seconds() < 4:
+                return _cached['ltp']
         resp = _dhan_post("https://api.dhan.co/v2/marketfeed/ltp",
                           {seg: [int(scrip)]}, max_retries=1)
         if not resp:
@@ -1756,7 +1945,7 @@ def get_index_spot_ltp(scrip: int = NIFTY_UNDERLYING_SCRIP, seg: str = NIFTY_UND
             or (resp.get('data', {}) or {}).get(seg, {}).get(int(scrip))
         ltp = float(node.get('last_price') or 0) if node else 0.0
         if ltp > 0:
-            st.session_state[_ck] = {'ltp': ltp, 'ts': _now}
+            st.session_state[_ck] = {'ltp': ltp, 'ts': _now, 'render': _rid}
             return ltp
     except Exception:
         pass
@@ -1767,14 +1956,78 @@ def get_dhan_expiry_list(underlying_scrip: int, underlying_seg: str, max_retries
                       {"UnderlyingScrip": underlying_scrip, "UnderlyingSeg": underlying_seg},
                       max_retries)
 
+#: How long to wait on the scrip master before giving up. `pd.read_csv(url)`
+#: accepts no timeout at all, so a stalled connection blocks forever — which is
+#: how the app came to sit on its loading screen. (connect, read) seconds.
+SCRIP_MASTER_TIMEOUT = (10, 90)
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def _scrip_master():
+    """Dhan's scrip master as one cached frame, fetched at most once per 6h.
+
+    ~26 MB and ~212k rows. Three separate functions used to each call
+    `pd.read_csv(url)` on it, so a cold start paid the download once per
+    caller. They now share this one frame.
+
+    Fetched through `requests` rather than handing the URL to pandas purely so
+    it can carry a timeout: an untimed read hangs the render thread with no
+    error and no way to tell it apart from a dead app.
+    """
+    try:
+        resp = requests.get("https://images.dhan.co/api-data/api-scrip-master.csv",
+                            timeout=SCRIP_MASTER_TIMEOUT)
+        resp.raise_for_status()
+        df = pd.read_csv(io.BytesIO(resp.content), low_memory=False)
+        df.columns = [c.strip().upper() for c in df.columns]
+        return df
+    except Exception as e:
+        st.session_state['_scrip_master_err'] = f"scrip master: {str(e)[:140]}"
+        return None
+
+
+@st.cache_data(ttl=21600)
+def resolve_index_security_id(trading_symbol: str, exchange: str):
+    """Resolve an INDEX security id from Dhan's scrip master CSV — the same
+    authoritative source `get_nifty_futures_security_id` already uses.
+
+    Hardcoding these is how the SENSEX chart silently drew NIFTY candles: a
+    wrong id returns no data, and the caller kept the previous frame. Dhan is
+    the only thing that actually knows the id, so ask it.
+
+    `trading_symbol` matches SEM_TRADING_SYMBOL exactly (e.g. 'SENSEX',
+    'NIFTY'); `exchange` is the SEM_EXM_EXCH_ID ('BSE' / 'NSE'). Cached 6h.
+    Returns an int security id, or None when the lookup fails.
+    """
+    try:
+        df = _scrip_master()
+        if df is None:
+            return None
+        sym_col = next((c for c in df.columns if 'TRADING_SYMBOL' in c), None)
+        inst_col = next((c for c in df.columns if 'INSTRUMENT' in c and 'NAME' in c), None)
+        secid_col = next((c for c in df.columns if 'SECURITY_ID' in c), None)
+        exch_col = next((c for c in df.columns if 'EXCH_ID' in c), None)
+        if not all([sym_col, inst_col, secid_col, exch_col]):
+            return None
+        mask = (df[inst_col].astype(str).str.upper().str.strip().eq('INDEX')
+                & df[sym_col].astype(str).str.upper().str.strip().eq(trading_symbol.upper())
+                & df[exch_col].astype(str).str.upper().str.strip().eq(exchange.upper()))
+        hit = df[mask]
+        if hit.empty:
+            return None
+        return int(hit.iloc[0][secid_col])
+    except Exception:
+        return None
+
+
 @st.cache_data(ttl=21600)
 def get_nifty_futures_security_id():
     """Resolve the current/nearest-month NIFTY FUTIDX security id from Dhan's
     scrip master CSV. Cached 6h; auto-rolls to the next month's contract."""
     try:
-        url = "https://images.dhan.co/api-data/api-scrip-master.csv"
-        df = pd.read_csv(url, low_memory=False)
-        df.columns = [c.strip().upper() for c in df.columns]
+        df = _scrip_master()
+        if df is None:
+            return None
         sym_col = next((c for c in df.columns if 'TRADING_SYMBOL' in c), None)
         inst_col = next((c for c in df.columns if 'INSTRUMENT' in c and 'NAME' in c), None)
         secid_col = next((c for c in df.columns if 'SECURITY_ID' in c), None)
@@ -1810,14 +2063,18 @@ def get_nifty_futures_security_id():
         return None
 
 @st.cache_data(ttl=21600)
-def get_nifty_option_security_ids(expiry: str):
-    """Resolve Dhan security IDs for all NIFTY OPTIDX strikes of one expiry from
+def get_nifty_option_security_ids(expiry: str, symbol: str = "NIFTY"):
+    """Resolve Dhan security IDs for all OPTIDX strikes of one expiry from
     the scrip-master CSV. Returns {(strike_float, 'CE'/'PE'): security_id_int}.
-    Cached 6h. expiry is the Dhan option-chain expiry string (e.g. '2026-06-19')."""
+    Cached 6h. expiry is the Dhan option-chain expiry string (e.g. '2026-06-19').
+
+    `symbol` selects the instrument via INDEX_OPTION_SPECS; it defaults to
+    NIFTY so existing callers are unchanged.
+    """
     try:
-        url = "https://images.dhan.co/api-data/api-scrip-master.csv"
-        df = pd.read_csv(url, low_memory=False)
-        df.columns = [c.strip().upper() for c in df.columns]
+        df = _scrip_master()
+        if df is None:
+            return {}
         sym_col = next((c for c in df.columns if 'TRADING_SYMBOL' in c), None)
         inst_col = next((c for c in df.columns if 'INSTRUMENT' in c and 'NAME' in c), None)
         secid_col = next((c for c in df.columns if 'SECURITY_ID' in c), None)
@@ -1830,16 +2087,18 @@ def get_nifty_option_security_ids(expiry: str):
                 f"scrip master option columns missing — got {list(df.columns)[:10]}…"
             )
             return {}
+        spec = option_spec(symbol)
         mask = df[inst_col].astype(str).str.upper().str.strip().eq('OPTIDX')
         if exch_col:
-            mask &= df[exch_col].astype(str).str.upper().str.strip().eq('NSE')
+            mask &= df[exch_col].astype(str).str.upper().str.strip().eq(spec["exchange"])
         sym_up = df[sym_col].astype(str).str.upper()
-        mask &= sym_up.str.contains('NIFTY')
-        for excl in ('BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT'):
-            mask &= ~sym_up.str.contains(excl)
+        # Exact symbol before the first '-', so SENSEX never picks up SENSEX50
+        # and NIFTY never picks up BANKNIFTY. `contains` would take both.
+        mask &= sym_up.str.split('-').str[0].str.strip().eq(spec["prefix"])
         opt = df[mask].copy()
         if opt.empty:
-            st.session_state['_nifty_opt_err'] = "no NIFTY OPTIDX rows in scrip master"
+            st.session_state['_nifty_opt_err'] = (
+                f"no {spec['prefix']} OPTIDX rows in scrip master")
             return {}
         # Match expiry by date
         opt['_exp'] = pd.to_datetime(opt[expiry_col], errors='coerce').dt.date
@@ -2440,56 +2699,87 @@ def calculate_vanna_charm_exposure(df_summary, spot_price, contract_multiplier=2
         return None
 
 
+def _cross_expiry_row(exp, oc_resp, spot_price):
+    """One expiry's ATM±2 ΔOI row, or None when the chain is unusable."""
+    data = (oc_resp or {}).get('data') or {}
+    oc = data.get('oc') or {}
+    und = float(data.get('last_price') or spot_price or 0)
+    if not oc or not und:
+        return None
+    strikes = sorted(float(k) for k in oc.keys())
+    if len(strikes) < 3:
+        return None
+    atm = min(strikes, key=lambda x: abs(x - und))
+    gap = min((abs(b - a) for a, b in zip(strikes, strikes[1:])), default=50) or 50
+    ce_chg = pe_chg = ce_oi = pe_oi = 0.0
+    for k, sd in oc.items():
+        if abs(float(k) - atm) > 2 * gap:
+            continue
+        ce = sd.get('ce') or {}
+        pe = sd.get('pe') or {}
+        ce_chg += float(ce.get('oi') or 0) - float(ce.get('previous_oi') or 0)
+        pe_chg += float(pe.get('oi') or 0) - float(pe.get('previous_oi') or 0)
+        ce_oi += float(ce.get('oi') or 0)
+        pe_oi += float(pe.get('oi') or 0)
+    pcr = round(pe_oi / ce_oi, 2) if ce_oi > 0 else 0.0
+    if pe_chg > ce_chg * 1.2 and pe_chg > 0:
+        bias = 'BULL'
+    elif ce_chg > pe_chg * 1.2 and ce_chg > 0:
+        bias = 'BEAR'
+    else:
+        bias = 'NEUTRAL'
+    return {'expiry': exp, 'pcr': pcr, 'ce_chg': round(ce_chg / 1e5, 2),
+            'pe_chg': round(pe_chg / 1e5, 2), 'bias': bias}
+
+
 def compute_cross_expiry_bias(spot_price, n_expiries=3, ttl=120):
     """📅 Cross-expiry term structure — compare the ATM±2 ΔOI positioning bias
     across the nearest N expiries (weekly / next / monthly). All expiries
-    agreeing = conviction; near-term vs far-term split = caution. Heavily cached
-    (default 120s) and skipped during a Dhan 429 back-off, since each expiry is a
-    separate option-chain fetch. Context only. Returns dict or None."""
+    agreeing = conviction; near-term vs far-term split = caution. Context only.
+    Returns dict or None.
+
+    ⏱️ ONE chain fetch per render, at most. This used to loop all N expiries
+    back to back whenever its 120s cache expired — three requests into an
+    endpoint Dhan caps at one per three seconds, which is what tripped the
+    limiter. Spacing them fixed the 429s but spent ~6s of the render asleep.
+
+    So the expiries rotate instead: each render refreshes the single stalest
+    one whose row is older than `ttl`, and the verdict is computed from
+    whatever rows are held. Three expiries at ~20s per render come round well
+    inside the 120s each row is allowed to live, so nothing is staler than
+    before — it is the same work, spread rather than burst. The fetch never
+    waits (`allow_wait=False`): if the 3s window is not open, this render
+    simply skips and the next one picks it up.
+    """
     ist = pytz.timezone('Asia/Kolkata')
     _cache = st.session_state.get('_cross_expiry_cache')
-    if _cache and (time.time() - _cache[0] < ttl):
-        return _cache[1]
-    _back = st.session_state.get('_dhan_429_until')
-    if _back and datetime.now(ist) < _back:
-        return _cache[1] if _cache else None
     try:
         el = get_dhan_expiry_list_cached(NIFTY_UNDERLYING_SCRIP, NIFTY_UNDERLYING_SEG)
         exps = (el or {}).get('data', [])[:n_expiries]
         if not exps:
-            return None
-        rows = []
-        for exp in exps:
-            oc_resp = get_dhan_option_chain(NIFTY_UNDERLYING_SCRIP, NIFTY_UNDERLYING_SEG, exp)
-            data = (oc_resp or {}).get('data') or {}
-            oc = data.get('oc') or {}
-            und = float(data.get('last_price') or spot_price or 0)
-            if not oc or not und:
-                continue
-            strikes = sorted(float(k) for k in oc.keys())
-            if len(strikes) < 3:
-                continue
-            atm = min(strikes, key=lambda x: abs(x - und))
-            gap = min((abs(b - a) for a, b in zip(strikes, strikes[1:])), default=50) or 50
-            ce_chg = pe_chg = ce_oi = pe_oi = 0.0
-            for k, sd in oc.items():
-                if abs(float(k) - atm) > 2 * gap:
-                    continue
-                ce = sd.get('ce') or {}
-                pe = sd.get('pe') or {}
-                ce_chg += float(ce.get('oi') or 0) - float(ce.get('previous_oi') or 0)
-                pe_chg += float(pe.get('oi') or 0) - float(pe.get('previous_oi') or 0)
-                ce_oi += float(ce.get('oi') or 0)
-                pe_oi += float(pe.get('oi') or 0)
-            pcr = round(pe_oi / ce_oi, 2) if ce_oi > 0 else 0.0
-            if pe_chg > ce_chg * 1.2 and pe_chg > 0:
-                bias = 'BULL'
-            elif ce_chg > pe_chg * 1.2 and ce_chg > 0:
-                bias = 'BEAR'
-            else:
-                bias = 'NEUTRAL'
-            rows.append({'expiry': exp, 'pcr': pcr, 'ce_chg': round(ce_chg / 1e5, 2),
-                         'pe_chg': round(pe_chg / 1e5, 2), 'bias': bias})
+            return _cache[1] if _cache else None
+
+        from mios_v5.fetch_rotation import drop_missing, next_to_refresh
+        store = drop_missing(
+            st.session_state.setdefault('_cross_expiry_rows', {}), exps)
+
+        _back = st.session_state.get('_dhan_429_until')
+        _backing_off = bool(_back and datetime.now(ist) < _back)
+        now = time.time()
+        if not _backing_off:
+            _target = next_to_refresh(
+                exps, {e: v.get('ts', 0.0) for e, v in store.items()}, now, ttl)
+            if _target is not None:
+                _row = _cross_expiry_row(
+                    _target,
+                    get_dhan_option_chain(NIFTY_UNDERLYING_SCRIP, NIFTY_UNDERLYING_SEG,
+                                          _target, allow_wait=False),
+                    spot_price)
+                if _row:
+                    store[_target] = {'ts': now, 'row': _row}
+
+        # nearest expiry first, and only the ones actually held
+        rows = [store[e]['row'] for e in exps if (store.get(e) or {}).get('row')]
         if not rows:
             return _cache[1] if _cache else None
         bulls = sum(1 for r in rows if r['bias'] == 'BULL')
@@ -6988,11 +7278,31 @@ def classify_leg_sr_behavior(df_l, ltp):
                     candidates.append((1, 'BUILDING', side, level, 'bull'))
                 else:
                     candidates.append((1, 'BUILDING', side, level, 'bear'))
+        # ── both sides are measured, so publish both ──────────────────
+        # The winner below is the headline — the level price is reacting to
+        # most strongly — and it is what the chart marks and what every
+        # existing consumer reads. But the loop above evaluates resistance AND
+        # support, and returning only the winner threw the other away: a leg
+        # sitting between its two levels reported one of them and looked as if
+        # the other did not exist. `sides` keeps each side's own best read,
+        # additively, so nothing that reads `state`/`side`/`level` changes.
+        by_side = {}
+        for pri, st_, sd, lv, dr in candidates:
+            best = by_side.get(sd)
+            if best is None or pri > best['priority']:
+                by_side[sd] = {'state': st_, 'side': sd, 'level': float(lv),
+                               'direction': dr, 'priority': pri}
+
         if not candidates:
-            return {'state': 'NONE', 'side': None, 'level': None, 'direction': 'none'}
+            return {'state': 'NONE', 'side': None, 'level': None,
+                    'direction': 'none', 'sides': {}}
+        # Ties break toward resistance purely because it is iterated first.
+        # That is arbitrary, so it is recorded rather than relied upon: with
+        # `sides` published, a tie no longer hides the other level.
         candidates.sort(key=lambda x: -x[0])
         _, state, side, level, direction = candidates[0]
-        return {'state': state, 'side': side, 'level': float(level), 'direction': direction}
+        return {'state': state, 'side': side, 'level': float(level),
+                'direction': direction, 'sides': by_side}
     except Exception:
         return None
 
@@ -7796,7 +8106,10 @@ def compute_market_picture(spot_price, df, option_data, cat_scores=None):
                   'strength': None, 'building': False, 'net': up - down,
                   'why': []}
     try:
-        _prox = 25.0
+        # Use instrument context for proximity band (±25 for NIFTY, scales for others)
+        _ctx = st.session_state.get('_current_instrument_context')
+        _atm_range = (_ctx.atm_range if _ctx else 100)
+        _prox = (_atm_range / 100.0) * 25.0  # scale ±25 by atm_range ratio
         _fmr_g = st.session_state.get('_full_market_read') or {}
         _sup_lv = (sup or {}).get('price') or (oi_floor[0] if oi_floor else None)
         _res_lv = (res or {}).get('price') or (oi_ceiling[0] if oi_ceiling else None)
@@ -7883,18 +8196,21 @@ def compute_market_picture(spot_price, df, option_data, cat_scores=None):
                                'strength': round(_str), 'building': _building})
             _zone_ok = (_str >= 55) or _building
             # ── A) room / R:R to the opposite zone ──────────────────
+            # Invalidation distance scales with atm_range: ±30 for NIFTY (100 atm_range)
+            _inval_offset = (_atm_range / 100.0) * 30.0
             if _zone == 'SUPPORT':
                 _target = _res_lv or (_lv + 60)
-                _inval = _lv - 30
+                _inval = _lv - _inval_offset
                 _room = (_target - spot_price) if _target else 0
                 _risk = max(spot_price - _inval, 1.0)
             else:
                 _target = _sup_lv or (_lv - 60)
-                _inval = _lv + 30
+                _inval = _lv + _inval_offset
                 _room = (spot_price - _target) if _target else 0
                 _risk = max(_inval - spot_price, 1.0)
             _rr = (_room / _risk) if _risk > 0 else 0
-            _room_ok = _room >= 40 and _rr >= 1.5
+            _room_min = (_atm_range / 100.0) * 40.0  # room minimum scales with atm_range
+            _room_ok = _room >= _room_min and _rr >= 1.5
             entry_gate.update({'target': _target, 'invalidation': _inval,
                                'rr': round(_rr, 2), 'room': round(_room)})
             # ── B) chop / range filter (accumulation/distribution) ──
@@ -8481,17 +8797,19 @@ def render_market_picture(spot_price, df, option_data, cat_scores=None):
                 # attempt + one Supabase row (even if Telegram is throttled)
                 st.session_state['_entry_gate_last_sig'] = _sig
                 # 🎯/❌ trade frame: target = opposite zone; invalidation =
-                # 30 pts beyond the zone (past the ±25 band = zone truly broke)
+                # atm_range-scaled pts beyond the zone (past the ±prox band = zone truly broke)
                 _sup_lv_x = (mp.get('sup') or {}).get('price') or \
                     (mp['oi_floor'][0] if mp.get('oi_floor') else None)
                 _res_lv_x = (mp.get('res') or {}).get('price') or \
                     (mp['oi_ceiling'][0] if mp.get('oi_ceiling') else None)
+                _inval_offset_msg = (_atm_range / 100.0) * 30.0
+                _sym = _ctx.symbol if _ctx else 'NIFTY'
                 if _st_a == 'CALL':
                     _tgt_a = _res_lv_x or (_lv_a + 60)
-                    _inv_a = _lv_a - 30
+                    _inv_a = _lv_a - _inval_offset_msg
                 else:
                     _tgt_a = _sup_lv_x or (_lv_a - 60)
-                    _inv_a = _lv_a + 30
+                    _inv_a = _lv_a + _inval_offset_msg
                 _em_a = '🟢' if _st_a == 'CALL' else '🔴'
                 _msg_a = (
                     f"{_em_a} <b>ENTRY GATE — BUY {_st_a} ZONE ACTIVE</b>\n"
@@ -8502,7 +8820,7 @@ def render_market_picture(spot_price, df, option_data, cat_scores=None):
                     f"Engines net: {(_eg_a.get('net') or 0):+d} · "
                     f"Regime {mp.get('regime', '—')}\n"
                     f"🎯 Target ₹{_tgt_a:.0f} · ❌ Invalidation ₹{_inv_a:.0f}\n"
-                    f"NIFTY Spot ₹{spot_price:,.1f}\n"
+                    f"{_sym} Spot ₹{spot_price:,.1f}\n"
                     f"⏱️ All 3 gates met (zone + strength + alignment) — "
                     f"your decision, no auto-entry")
                 _sent_a = _throttled_telegram_send(
@@ -8590,7 +8908,7 @@ def render_market_picture(spot_price, df, option_data, cat_scores=None):
                     + f" · engines net {(_eg_a.get('net') or 0):+d}\n"
                     + (f"🎯 Target ₹{_tgt_ar:.0f} · R:R {_eg_a.get('rr', '—')} "
                        f"· ❌ Invalidation ₹{_inv_ar:.0f}\n" if _tgt_ar and _inv_ar else "")
-                    + f"NIFTY Spot ₹{spot_price:,.1f}\n"
+                    + f"{_sym} Spot ₹{spot_price:,.1f}\n"
                     f"⚠️ Price has ENTERED the zone — <b>WAIT for the confirmation "
                     f"candle</b>. Don't chase the first touch (fake-break / SL-hunt "
                     f"filter active). A separate CONFIRMED alert follows if the zone "
@@ -10715,7 +11033,16 @@ def _fmr_leg_df(strike, side):
     if not sid or api is None:
         return None
     cache = st.session_state.setdefault('_cockpit_wing_cache', {})
-    if time.time() - cache.get(sid, {}).get('ts', 0) > 90:
+    # Share the render's leg-fetch budget, exactly as the other wing fetch
+    # already does. The strike loop that reaches here runs ATM±2 on both sides,
+    # and only ATM±1 is in `_atm_leg_dfs` — so the four ±2 legs all fell through
+    # to this fetch with nothing capping them, on top of the five the budget
+    # allows. Out of budget, serve the cached frame and rotate in next render.
+    _wb = st.session_state.get('_leg_fetch_budget')
+    _may_fetch = not (_wb and _wb[1] <= 0)
+    if _may_fetch and time.time() - cache.get(sid, {}).get('ts', 0) > 90:
+        if _wb:
+            _wb[1] -= 1
         try:
             _raw = api.get_intraday_data(security_id=sid, exchange_segment=ctx.get('seg'),
                                          instrument="OPTIDX", interval="1", days_back=1)
@@ -11368,9 +11695,9 @@ def _notify_chart_formations():
             seen[key] = updated
             for s in to_alert:
                 try:
-                    send_telegram_message_sync(
-                        msg_of(chart, labels.get(chart), item_by_sig[s], dp),
-                        force=True)
+                    # → the alert bot, not the main stream (owner's request).
+                    send_formation_alert(
+                        msg_of(chart, labels.get(chart), item_by_sig[s], dp))
                 except Exception:
                     pass
 
@@ -11459,6 +11786,169 @@ def _notify_leg_hvp_touch():
                         send_telegram_message_sync(msg, force=True)
                     except Exception:
                         pass
+    except Exception:
+        pass  # an alert must never take the cycle down
+
+
+def _gather_market_snapshot():
+    """Collect everything the app has ALREADY computed into one flat dict for
+    `mios_v5.market_snapshot.build`. Every read is defensive — a missing producer
+    just drops its field, and the formatter skips empty sections."""
+    def _n(v):
+        try:
+            f = float(v)
+            return None if f != f else f
+        except (TypeError, ValueError):
+            return None
+
+    def _wall(x):
+        return x[0] if isinstance(x, (list, tuple)) and x else None
+
+    d = {}
+    ss = st.session_state
+    d['spot'] = _n(ss.get('_nifty_spot_live'))
+    d['time'] = (ss.get('_opt_data_ts') or '')[:19].replace('T', ' ') or None
+
+    mp = ss.get('_market_picture') or {}
+    d['regime'] = mp.get('regime')
+    d['p_up'], d['p_down'], d['p_side'] = mp.get('p_up'), mp.get('p_down'), mp.get('p_side')
+    d['vwap'] = _n(mp.get('vwap'))
+    d['oi_ce_wall'] = _n(_wall(mp.get('oi_ceiling')))
+    d['oi_pe_wall'] = _n(_wall(mp.get('oi_floor')))
+    d['magnet'] = _n(_wall(mp.get('oi_pin')))
+    _ab = mp.get('atm_bias') or {}
+    d['atm_verdict'] = _ab.get('verdict')
+    d['atm_score'] = (f"{_ab['score']:+.1f}" if _n(_ab.get('score')) is not None else None)
+    _dex = mp.get('dex_bias')
+    d['dex'] = (_dex.get('label') if isinstance(_dex, dict) else _dex)
+    _sk = mp.get('skew_bias')
+    d['skew'] = (_sk.get('label') if isinstance(_sk, dict) else _sk)
+    _doi = mp.get('doi_bias')
+    d['doi_bias'] = (_doi.get('label') if isinstance(_doi, dict) else _doi)
+    for _k, _src in (('global', 'global_bias'), ('news', 'news_bias'),
+                     ('commodity', 'commodity_bias')):
+        _v = mp.get(_src)
+        d[_k] = (_v.get('label') or _v.get('regime') if isinstance(_v, dict) else _v)
+    _vc = mp.get('vc_exp') or {}
+    d['net_vanna'] = (f"vanna {_vc['net_vanna']:+,.0f}" if _n(_vc.get('net_vanna')) is not None else None)
+    d['net_charm'] = (f"charm {_vc['net_charm']:+,.0f}" if _n(_vc.get('net_charm')) is not None else None)
+    d['net_vega'] = (f"vega {_vc['net_vega']:+,.0f}" if _n(_vc.get('net_vega')) is not None else None)
+
+    gx = ss.get('_gex_data') or {}
+    d['total_gex'] = (f"{gx['total_gex']:+,.0f}" if _n(gx.get('total_gex')) is not None else None)
+    d['gamma_flip'] = _n(gx.get('gamma_flip_level'))
+    d['gex_signal'] = gx.get('gex_signal')
+
+    mf = ss.get('_money_flow_data') or {}
+    d['poc'] = _n(mf.get('poc_price'))
+    d['vah'] = _n(mf.get('value_area_high'))
+    d['val'] = _n(mf.get('value_area_low'))
+
+    try:
+        from mios_v5.final_read import build_final_read
+        fr = build_final_read(ss.get('_mios_state')) or {}
+        d['support'] = _n(fr.get('strong_support'))
+        d['resistance'] = _n(fr.get('strong_resistance'))
+        _bz = fr.get('battle_zone') or {}
+        d['war_zone'] = _n(_bz.get('price')) if isinstance(_bz, dict) else None
+        d['expected_winner'] = fr.get('expected_winner')
+    except Exception:
+        pass
+
+    fmr = ss.get('_full_market_read') or {}
+    d['call_mode'], d['put_mode'] = fmr.get('call_mode'), fmr.get('put_mode')
+    d['call_strength'], d['put_strength'] = fmr.get('call_strength'), fmr.get('put_strength')
+    d['breakout'], d['rejection'] = fmr.get('breakout'), fmr.get('breakdown')
+
+    # level-acceptance observed states, from the strip's last read
+    try:
+        _zones = ss.get('_la_zones_latest') or []
+        _la = []
+        for z in _zones:
+            _obs = str(z.get('observed') or '').replace('_', ' ')
+            _pz = _n(z.get('price'))
+            if _obs and _pz is not None:
+                _la.append(f"₹{_pz:,.0f} {_obs}")
+        d['level_acceptance'] = _la or None
+    except Exception:
+        pass
+
+    # greek behaviour headline, if the strip published one
+    try:
+        _gbh = ss.get('_greek_behaviour_synth')
+        if _gbh:
+            d['greek_behaviour'] = _gbh
+    except Exception:
+        pass
+    return d
+
+
+def _send_market_snapshot():
+    """Build the full snapshot and send it to Telegram (chunked). Returns the
+    number of parts sent, or 0 on failure."""
+    from mios_v5.market_snapshot import build as _snap_build, chunks as _snap_chunks
+    text = _snap_build(_gather_market_snapshot())
+    parts = _snap_chunks(text)
+    for _p in parts:
+        send_telegram_message_sync(_p, force=True)
+    return len(parts)
+
+
+def _notify_flow_at_level():
+    """📨 Alert-BOT note when one option side is being traded harder than the
+    other while spot sits on the matching level:
+
+      • PUT buy+sell heavier than CALL, spot AT RESISTANCE
+      • CALL buy+sell heavier than PUT, spot AT SUPPORT
+
+    Requested against the `CALL vs PUT — Cum Buy / Cum Sell` graph: a volume BURST
+    in the put at resistance → signal; same for the call at support. Each leg is
+    judged against ITS OWN recent normal — no put-vs-call comparison. Goes to the
+    SECOND (alert) Telegram bot, `send_telegram_alert_bot`, not the main stream.
+
+    Reads only already-published numbers — the graph's activity history
+    (`_atm_flow_hist`, stashed in `render_atm_cvd_graphs`) and the ranked
+    support/resistance (`final_read`). `mios_v5.flow_level_alerts` owns the "is it
+    bursting AND on the level AND is this a fresh crossing" decision; this only
+    reads, latches per event across cycles, and sends. The rising-edge latch is
+    deliberate — a standing condition re-emitted every cycle is exactly the flood
+    the pivot alerts produced. Opt-out via `_flow_level_alerts_on`.
+    """
+    try:
+        if not st.session_state.get('_flow_level_alerts_on',
+                                    FLOW_LEVEL_ALERTS_DEFAULT):
+            return
+        hist = st.session_state.get('_atm_flow_hist') or []
+        if len(hist) < 3:
+            return
+        from mios_v5 import flow_level_alerts as _fla
+        spot = st.session_state.get('_nifty_spot_live')
+        if not spot:
+            return
+        from mios_v5.final_read import build_final_read
+        fr = build_final_read(st.session_state.get('_mios_state')) or {}
+        # split the (t, call_act, put_act) history into per-leg (t, value) series
+        call_series = [(t, c) for (t, c, _p) in hist if c is not None]
+        put_series = [(t, p) for (t, _c, p) in hist if p is not None]
+        events = _fla.assess(
+            call_series, put_series, spot,
+            support=fr.get('strong_support'),
+            resistance=fr.get('strong_resistance'))
+
+        profs = st.session_state.get('_leg_profiles') or {}
+        call_label = profs.get('call_label') or 'ATM Call'
+        put_label = profs.get('put_label') or 'ATM Put'
+        states = st.session_state.setdefault('_flow_level_state', {})
+        now = time.time()
+        for name, info in events.items():
+            fire, new_state = _fla.latch(info['active'], states.get(name), now)
+            states[name] = new_state
+            if fire:
+                try:
+                    send_telegram_alert_bot(
+                        _fla.message(name, info, call_label, put_label))
+                except Exception:
+                    pass
     except Exception:
         pass  # an alert must never take the cycle down
 
@@ -11691,6 +12181,89 @@ def _notify_confluence_entry():
             st.session_state['_confluence_alert_state'] = {'key': key, 'ts': now}
         except Exception:
             pass
+    except Exception:
+        pass  # an alert must never take the cycle down
+
+
+def _notify_entry_reversed():
+    """⚠️ Alert to Telegram when NIFTY is at a price zone but the bias has
+    reversed against the trade setup. This catches whipsaw scenarios where
+    price reached the level but conditions deteriorated (trend weakened,
+    opposite writers appeared, etc.).
+
+    Latched per reversal with a cooldown so it fires once, not every cycle.
+    Opt-out via `_entry_reversed_on`.
+    """
+    try:
+        if not st.session_state.get('_entry_reversed_on', ENTRY_REVERSED_ALERT_DEFAULT):
+            return
+        if not TELEGRAM_ALERT_BOT_TOKEN or not TELEGRAM_ALERT_CHAT_ID:
+            return
+        from mios_v5.final_read import build_final_read
+
+        mp = st.session_state.get('_market_picture') or {}
+        spot = st.session_state.get('_nifty_spot_live')
+        if not spot or not mp:
+            return
+        spot = float(spot)
+
+        eg = mp.get('entry_gate') or {}
+        state = eg.get('state', '')
+
+        if state != 'REVERSED':
+            return
+
+        level = eg.get('level')
+        zone = eg.get('zone', '')
+        if not level:
+            return
+
+        # Latch with cooldown so we alert once per reversal, not every cycle
+        states = st.session_state.setdefault('_entry_reversed_state', {})
+        now = time.time()
+        key = f"reversed:{round(level, 1)}"
+        prev = states.get(key, {})
+
+        last_alert = prev.get('last_alert_time')
+        if last_alert and (now - last_alert) < ENTRY_REVERSED_COOLDOWN_S:
+            return  # sleeping (cooldown active)
+
+        # Alert once on entry to the reversed state
+        if prev.get('state_seen'):
+            return  # already alerted for this reversal
+
+        fr = build_final_read(st.session_state.get('_mios_state')) or {}
+        _ab = mp.get('atm_bias') or {}
+        reason = eg.get('reason', '')
+
+        msg = (
+            f"⚠️ <b>Entry Reversal at ₹{level:,.0f}</b>\n"
+            f"Zone: {zone} · ATM: {_ab.get('verdict', 'N/A')}\n"
+            f"Reason: {reason}\n"
+            f"Current: 🎯 ₹{spot:,.1f}"
+        )
+
+        try:
+            # Send to alert bot, not main bot
+            url = f"https://api.telegram.org/bot{TELEGRAM_ALERT_BOT_TOKEN}/sendMessage"
+            payload = {
+                "chat_id": TELEGRAM_ALERT_CHAT_ID,
+                "text": msg,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True
+            }
+            requests.post(url, json=payload, timeout=5)
+        except Exception:
+            pass
+
+        # Mark as alerted
+        states[key] = {'state_seen': True, 'last_alert_time': now}
+
+        # Reset alert tracker if spot moves far from the level (so next reversal at same level re-alerts)
+        dist = abs(spot - level)
+        if dist > eg.get('band', 5) * 3:  # 3x the entry band means we've clearly left
+            states.pop(key, None)
+
     except Exception:
         pass  # an alert must never take the cycle down
 
@@ -12320,6 +12893,33 @@ def render_atm_cvd_graphs(spot_price):
                     _cvd_last(_live['delta'][1])))
         if len(_zh) > 120:
             del _zh[:len(_zh) - 120]
+    except Exception:
+        pass
+
+    # 📨 CALL/PUT activity HISTORY (cumulative buy + sell per side), for the
+    # flow-at-level alert (`_notify_flow_at_level`). Stashed HERE because this is
+    # where the graph's own numbers are computed — the alert reads them rather than
+    # a second estimate. A history, not a single value, because the alert fires on a
+    # volume BURST — each leg's recent accumulation rate against its own prior
+    # normal — which needs the series. Runs every cycle: `_live` is built above the
+    # "Show graphs" toggle. Capped to a session's worth at ~20s cadence.
+    try:
+        from mios_v5 import flow_level_alerts as _fla_mod
+
+        def _flow_last(s):
+            try:
+                return float(s.iloc[-1]) if s is not None and len(s) else None
+            except Exception:
+                return None
+        _call_act = _fla_mod.activity(_flow_last(_live['buy'][0]),
+                                      _flow_last(_live['sell'][0]))
+        _put_act = _fla_mod.activity(_flow_last(_live['buy'][1]),
+                                     _flow_last(_live['sell'][1]))
+        _fh = st.session_state.setdefault('_atm_flow_hist', [])
+        if _call_act is not None or _put_act is not None:
+            _fh.append((time.time(), _call_act, _put_act))
+            if len(_fh) > 300:
+                del _fh[:len(_fh) - 300]
     except Exception:
         pass
 
@@ -14991,19 +15591,40 @@ def _publish_atm_legs(api, spot, option_data, render_id):
     the day, and letting stale strikes accumulate is what produced repeated
     legs and double-counted bias rows.
     """
+    # 🎯 Which index's legs these are. The LTP panels follow the instrument
+    # toggle, so on SENSEX they are SENSEX option legs: SENSEX expiries, SENSEX
+    # strikes, SENSEX security ids, quoted on BSE_FNO. `option_data` stays the
+    # NIFTY chain — it feeds the Greeks and the market picture, which are
+    # deliberately still NIFTY-only — so none of it is used for SENSEX legs.
+    _ctx_legs = st.session_state.get('_current_instrument_context')
+    _leg_sym = (_ctx_legs.symbol if _ctx_legs else 'NIFTY')
+    _is_alt = _leg_sym != 'NIFTY'
+
     opt = option_data or {}
-    summary = opt.get('df_summary')
-    expiry = (opt.get('expiry') or opt.get('selected_expiry')
-              or (st.session_state.get('_cached_raw_chain_latest') or {}).get('expiry'))
-    if not expiry:
+    summary = None if _is_alt else opt.get('df_summary')
+    if _is_alt:
+        # SENSEX's own nearest expiry — the NIFTY chain's expiry is a different
+        # weekday and would resolve to no strikes at all.
+        expiry = None
         try:
             listed = (get_dhan_expiry_list_cached(
-                NIFTY_UNDERLYING_SCRIP, NIFTY_UNDERLYING_SEG) or {}).get('data') or []
+                _ctx_legs.security_id, _ctx_legs.exchange_segment)
+                or {}).get('data') or []
             expiry = listed[0] if listed else None
         except Exception:
             expiry = None
+    else:
+        expiry = (opt.get('expiry') or opt.get('selected_expiry')
+                  or (st.session_state.get('_cached_raw_chain_latest') or {}).get('expiry'))
+        if not expiry:
+            try:
+                listed = (get_dhan_expiry_list_cached(
+                    NIFTY_UNDERLYING_SCRIP, NIFTY_UNDERLYING_SEG) or {}).get('data') or []
+                expiry = listed[0] if listed else None
+            except Exception:
+                expiry = None
     try:
-        sid_map = get_nifty_option_security_ids(expiry) or {} if expiry else {}
+        sid_map = get_nifty_option_security_ids(expiry, _leg_sym) or {} if expiry else {}
     except Exception:
         sid_map = {}
 
@@ -15011,10 +15632,25 @@ def _publish_atm_legs(api, spot, option_data, render_id):
         strikes = sorted(summary['Strike'].dropna().unique().tolist())
     else:
         strikes = sorted({k[0] for k in sid_map.keys()})
+
+    # The legs must be centred on THEIR OWN index. Pricing SENSEX strikes off
+    # a ~24,000 NIFTY spot picks the lowest listed SENSEX strike as "ATM".
+    if _is_alt:
+        try:
+            _alt_spot = get_index_spot_ltp(int(_ctx_legs.security_id),
+                                           _ctx_legs.exchange_segment)
+        except Exception:
+            _alt_spot = None
+        if not _alt_spot:
+            st.session_state['_atm_leg_err'] = (
+                f"No {_leg_sym} spot — cannot centre the {_leg_sym} option legs.")
+            return
+        spot = _alt_spot
+
     if not strikes or not spot:
         return
 
-    seg = 'NSE_FNO'
+    seg = index_option_segment(_leg_sym)
     atm = min(strikes, key=lambda x: abs(x - spot))
     diffs = [strikes[i + 1] - strikes[i] for i in range(len(strikes) - 1)]
     gap = min(diffs) if diffs else 50
@@ -15232,6 +15868,67 @@ def _render_main_analyzer():
     # ── sidebar: only what changes what is fetched ──────────────────────
     st.sidebar.header("Configuration")
 
+    # ── 🎯 Instrument selector: NIFTY or SENSEX ──────────────────────────
+    # Switch between instruments. Dhan-driven discovery; all specs from live API.
+    # Changing instrument invalidates all cached data to prevent cross-contamination.
+    from mios_v5.instrument_cache_manager import get_current_instrument, mark_instrument_changed
+    _current_instrument = get_current_instrument(st.session_state)
+    _selected_instrument = st.sidebar.selectbox(
+        "🎯 Instrument",
+        options=["NIFTY", "SENSEX"],
+        index=0 if _current_instrument == "NIFTY" else 1,
+        help="Switch between NIFTY (NSE) and SENSEX (BSE). The index chart and "
+             "the ATM Call/Put LTP panels both follow this; the option chain, "
+             "Greeks and Market Picture stay NIFTY. Specs come from Dhan's "
+             "scrip master, and cached data is cleared on switch."
+    )
+    if _selected_instrument != _current_instrument:
+        mark_instrument_changed(st.session_state, _selected_instrument)
+        st.rerun()
+
+    # ── 📤 one-click market snapshot → Telegram (for AI analysis) ─────
+    # Gathers everything the app already computed this cycle into one structured
+    # message and sends it, so it can be forwarded to an AI to analyse the market.
+    if st.sidebar.button("📤 Send market snapshot → Telegram (for AI)",
+                         help="Sends one structured message with the full market "
+                              "picture — regime, levels, ATM verdict, dealer/"
+                              "greeks, flow, level acceptance and context — to "
+                              "forward to an AI for a complete analysis. Reuses "
+                              "existing reads; sends nothing else."):
+        try:
+            _n_parts = _send_market_snapshot()
+            st.sidebar.success(f"Snapshot sent to Telegram "
+                               f"({_n_parts} message{'s' if _n_parts != 1 else ''}).")
+        except Exception as _snap_err:
+            st.sidebar.error(f"Snapshot failed: {_snap_err}")
+
+    # ── 🧬 MIOS V6 snapshot → Telegram (12 messages, complete context) ─────
+    # Pure formatter that gathers all existing MIOS V6 published values and
+    # splits them across 10-12 separate Telegram messages for external AI analysis.
+    # One message per major section: Time/Price, Market, S/R, Premium, Flow, Dealer,
+    # Greeks, Behaviour, Liquidity, Global, News, Signal.
+    if st.sidebar.button("🧬 Send MIOS V6 snapshot → Telegram (12 sections)",
+                         help="Sends complete MIOS V6 market analysis across 12 "
+                              "Telegram messages — one per section (Time, Market, "
+                              "S/R, Premium, Flow, Dealer, Greeks, Behaviour, "
+                              "Liquidity, Global, News, Signal). Phone-readable "
+                              "format for forwarding to external AI. Pure formatter, "
+                              "gathers only existing V6 data."):
+        try:
+            from mios_v5.mios_v6_snapshot import gather_mios_v6_data, format_snapshot
+            v6_data = gather_mios_v6_data(st.session_state)
+            v6_msgs = format_snapshot(v6_data)
+            if v6_msgs:
+                for v6_msg in v6_msgs:
+                    if v6_msg.strip():
+                        send_telegram_message_sync(v6_msg, force=True)
+                st.sidebar.success(f"MIOS V6 snapshot sent to Telegram "
+                                   f"({len(v6_msgs)} message{'s' if len(v6_msgs) != 1 else ''}).")
+            else:
+                st.sidebar.warning("No MIOS V6 data available to send.")
+        except Exception as _v6_err:
+            st.sidebar.error(f"MIOS V6 snapshot failed: {_v6_err}")
+
     # ── 📨 MIOS V6 entry / exit signals to Telegram ────────────────────
     # The default lives in `MIOS_V6_TELEGRAM_DEFAULT` (top of file) so it is
     # one findable line rather than a literal buried in the sidebar. The owner
@@ -15286,11 +15983,13 @@ def _render_main_analyzer():
     # already on screen at load is seeded silently). Consumed in
     # `_notify_chart_formations`.
     st.session_state["_formation_alerts_on"] = st.sidebar.checkbox(
-        "📐 HVP / VOB formation → Telegram", value=FORMATION_ALERTS_DEFAULT,
-        help="A Telegram note when a new high-volume pivot forms on NIFTY, Call "
-             "or Put, or a new Volume Order Block forms on a leg. Each formation "
-             "is sent once; what already exists when the app loads is not "
-             "re-announced.")
+        "📐 HVP / VOB formation → Alert Telegram", value=FORMATION_ALERTS_DEFAULT,
+        help="A note to the ALERT bot (the second Telegram account) when a new "
+             "high-volume pivot forms on NIFTY, Call or Put, or a new Volume "
+             "Order Block forms on a leg. Each formation is sent once; what "
+             "already exists when the app loads is not re-announced. Discord "
+             "gets its copy as before. Falls back to the main bot if the alert "
+             "bot is unconfigured.")
 
     # ── 📍 option LTP reaching its HVP line (±5) → Telegram ────────────
     st.session_state["_leg_hvp_touch_on"] = st.sidebar.checkbox(
@@ -15298,7 +15997,7 @@ def _render_main_analyzer():
         help="A Telegram note when the Call or Put LTP comes within ±5 points of "
              "one of its own high-volume-point lines. Latched per line and given "
              "a 15-minute cooldown (sleep), so a price sitting at the line does "
-             "not repeat.")
+             "not repeat. Off by default — enable it here.")
 
     # ── 🎯 spot reaching a key level (±5 pts) → Telegram ──────────────
     # War zone, either OI wall, and the ranked support / resistance. Latched per
@@ -15309,6 +16008,17 @@ def _render_main_analyzer():
         help="A Telegram note when spot comes within ±5 points of the war zone, "
              "an OI wall, or the ranked support / resistance. Sent once on "
              "arrival; re-arms only after price leaves the level.")
+
+    # ── 📨 flow-at-level → ALTERNATE Telegram bot ─────────────────────────
+    # PUT buy+sell heavier than CALL with spot at resistance, or CALL heavier
+    # than PUT with spot at support. Reads the CALL-vs-PUT Cum Buy/Sell graph's
+    # own numbers. Rising-edge + cooldown, so a standing condition sends once.
+    st.session_state["_flow_level_alerts_on"] = st.sidebar.checkbox(
+        "📨 Flow-at-level alerts → alert bot", value=FLOW_LEVEL_ALERTS_DEFAULT,
+        help="To the SECOND (alert) bot: when PUT buy+sell activity outweighs "
+             "CALL and spot is within 0.25% of resistance, or CALL outweighs "
+             "PUT and spot is within 0.25% of support. Sent once per crossing; "
+             "re-arms after the condition clears.")
 
     # ── ⚔️ level ACCEPTED / REJECTED → Telegram ───────────────────────
     # Fires when a level resolves (accepted above/below, or rejected), not on
@@ -15331,6 +16041,17 @@ def _render_main_analyzer():
              "leg's LTP at its support/session-low, and that side's premium "
              "energy the greater. Fires once per setup (cooldown). Reuses "
              "existing engines; changes no verdict.")
+
+    # ── ⚠️ Entry reversal (bias-against at zone) → Telegram ────────────
+    # Paused — it repeated the same level instead of firing once per reversal.
+    st.session_state["_entry_reversed_on"] = st.sidebar.checkbox(
+        "⚠️ Entry reversal (bias-against at zone) → Alert Telegram",
+        value=ENTRY_REVERSED_ALERT_DEFAULT,
+        help="Paused — this one repeated the same level rather than firing "
+             "once per reversal, so it is off. Tick to bring it back: a "
+             "Telegram note to the alert bot when NIFTY reaches a mapped "
+             "price zone but the bias has reversed (trend weakened, opposite "
+             "writers appeared, etc.). Reuses existing engines.")
 
     # ── the two sub-alerts the owner paused (off by default) ──────────
     # Ranked S/R touch is a subset of the level-touch alert above; VOB formation
@@ -15369,6 +16090,56 @@ def _render_main_analyzer():
                 "TELEGRAM_ALERT_CHAT_ID for the reasoned copy.")
     else:
         st.session_state.pop("_mios_transport", None)
+
+    # 🎯 The instrument comes from the ONE toggle built above. There used to be
+    # a second, identical "🎯 Instrument" selectbox here — two dropdowns in the
+    # sidebar, and because Streamlit keys a widget by its parameters and the two
+    # carried different `help` text, they got separate ids and both rendered
+    # rather than colliding. This one then wrote `_selected_instrument`
+    # unconditionally on every run, so it overwrote whatever the first dropdown
+    # had just set: changing the top toggle did nothing.
+    _selected_instrument = get_current_instrument(st.session_state)
+
+    # Set instrument context for the render cycle. Every spec below is a value
+    # read off Dhan's scrip master, not an assumption — an invented SENSEX id
+    # is what made the chart silently keep drawing NIFTY.
+    # ⏱️ NOTHING HERE MAY TOUCH THE NETWORK. This runs while the sidebar is
+    # being built, before a single pixel of the page is drawn, so anything slow
+    # here is indistinguishable from the app failing to start. It previously
+    # called `resolve_index_security_id`, which reads Dhan's 26 MB scrip master
+    # — ~5s on a fast link, far worse on a slow one, and `pd.read_csv(url)`
+    # takes no timeout, so a stalled connection hung the app on its loading
+    # screen indefinitely. The two index ids are fixed values that Dhan does not
+    # reissue, and they are pinned by tests, so they are used directly. The
+    # scrip master is still the source for OPTION ids, which genuinely change
+    # every expiry — that lookup happens later, off the first-paint path.
+    try:
+        from mios_v5.instrument_registry import InstrumentContext
+        if _selected_instrument == "SENSEX":
+            _ctx = InstrumentContext(
+                symbol="SENSEX", security_id=51, exchange_segment="IDX_I",
+                contract_multiplier=20.0,   # SEM_LOT_UNITS for SENSEX OPTIDX
+                strike_step=100,            # observed gap across SENSEX strikes
+                current_expiry="", expiry_list=[],
+                atm_range=100, lot_size=20, tick_size=0.05)
+        else:
+            _ctx = InstrumentContext(
+                symbol="NIFTY", security_id=13, exchange_segment="IDX_I",
+                contract_multiplier=65.0,   # SEM_LOT_UNITS for NIFTY OPTIDX
+                strike_step=50,             # observed gap across NIFTY strikes
+                current_expiry="", expiry_list=[],
+                atm_range=100, lot_size=65, tick_size=0.05)
+        st.session_state['_current_instrument_context'] = _ctx
+        st.sidebar.caption(
+            f"{_ctx.symbol} · id {_ctx.security_id} · {_ctx.exchange_segment}")
+    except Exception as _e_ctx:
+        # Loudly. A swallowed ImportError here is exactly how the toggle came
+        # to do nothing at all: context stayed None, every reader fell back to
+        # its NIFTY default, and the chart looked like it was ignoring you.
+        st.session_state['_current_instrument_context'] = None
+        st.sidebar.error(
+            f"⚠️ Instrument context unavailable — the toggle will NOT switch "
+            f"the chart. {type(_e_ctx).__name__}: {str(_e_ctx)[:120]}")
 
     timeframes = {"1 min": "1", "3 min": "3", "5 min": "5",
                   "15 min": "15", "25 min": "25", "60 min": "60"}
@@ -15501,28 +16272,50 @@ def _render_main_analyzer():
     _v5_container = st.container()
     _bias_container = st.container()
 
-    # ── 1 · NIFTY candles + spot ────────────────────────────────────────
+    # Get instrument context for the chart (selected in the sidebar above).
+    _ctx_ltp = st.session_state.get('_current_instrument_context')
+    _sec_id_ltp = int(_ctx_ltp.security_id) if _ctx_ltp else 13
+    _seg_ltp = _ctx_ltp.exchange_segment if _ctx_ltp else "IDX_I"
+    _sym_ltp = _ctx_ltp.symbol if _ctx_ltp else "NIFTY"
+
+    # ── 1 · Index candles + spot (NIFTY or SENSEX based on selection) ────
     df = pd.DataFrame()
     try:
-        _raw = api.get_intraday_data(security_id="13", exchange_segment="IDX_I",
+        _raw = api.get_intraday_data(security_id=_sec_id_ltp, exchange_segment=_seg_ltp,
                                      instrument="INDEX", interval=interval,
                                      days_back=days_back)
         if _raw:
             df = process_candle_data(_raw, interval)
-            db.upsert_candles("NIFTY50", "IDX_I", interval, df)
+            db.upsert_candles(_sym_ltp, _seg_ltp, interval, df)
     except Exception as err:
         st.caption(f"Candle fetch unavailable: {err}")
     if df.empty:
         try:
-            df = db.get_candles("NIFTY50", "IDX_I", interval, hours_back=days_back * 24)
+            df = db.get_candles(_sym_ltp, _seg_ltp, interval, hours_back=days_back * 24)
         except Exception:
             df = pd.DataFrame()
+    # 🚨 A failed instrument fetch must NOT look like a working one. The frame
+    # below is only overwritten `if not df.empty`, so an empty SENSEX fetch
+    # used to leave the previous NIFTY frame on screen — the chart appeared to
+    # simply ignore the toggle. Say which instrument the frame actually is, and
+    # drop a stale frame belonging to the other instrument rather than pass it
+    # off as this one.
+    if df.empty:
+        st.error(
+            f"❌ No {_sym_ltp} candles from Dhan (id {_sec_id_ltp} · {_seg_ltp}) "
+            f"and none cached. The chart below is NOT {_sym_ltp} — it is the "
+            f"last frame that did load. Check the instrument id / market hours.")
+        if st.session_state.get('_chart_instrument') not in (None, _sym_ltp):
+            for _k in ('_nifty_df_live', '_last_df', '_df_5m'):
+                st.session_state.pop(_k, None)
+    else:
+        st.session_state['_chart_instrument'] = _sym_ltp
 
     # `get_index_spot_ltp` caches for 4s and hits the same endpoint the chain
     # does, so this is one network call, not the two the full app made.
     spot = None
     try:
-        spot = get_index_spot_ltp(NIFTY_UNDERLYING_SCRIP, NIFTY_UNDERLYING_SEG)
+        spot = get_index_spot_ltp(int(_sec_id_ltp), _seg_ltp)
     except Exception:
         spot = None
     if not spot and not df.empty:
@@ -15531,7 +16324,8 @@ def _render_main_analyzer():
         st.session_state['_nifty_spot_live'] = float(spot)
         st.session_state['_nifty_spot_live_ts'] = time.time()
         try:
-            db.upsert_spot_data(spot, security_id='13', exchange_segment='IDX_I')
+            db.upsert_spot_data(spot, security_id=str(_sec_id_ltp),
+                                exchange_segment=_seg_ltp)
         except Exception:
             pass
         try:
@@ -15556,7 +16350,7 @@ def _render_main_analyzer():
 
     # 5-minute frame for Stage 3 market memory and Stage 4's opening print.
     try:
-        _r5 = api.get_intraday_data(security_id="13", exchange_segment="IDX_I",
+        _r5 = api.get_intraday_data(security_id=_sec_id_ltp, exchange_segment=_seg_ltp,
                                     instrument="INDEX", interval="5",
                                     days_back=max(days_back, 3))
         if _r5:
@@ -16025,6 +16819,10 @@ def _render_main_analyzer():
         _notify_leg_hvp_touch()
     except Exception:
         pass
+    try:
+        _notify_flow_at_level()
+    except Exception:
+        pass
 
     # 🎯 Spot-at-a-key-level (±5 pts) alerts — war zone, OI walls, ranked S/R.
     # Same placement: the MIOS state and `_market_picture` are current by now,
@@ -16040,6 +16838,10 @@ def _render_main_analyzer():
         pass
     try:
         _notify_confluence_entry()
+    except Exception:
+        pass
+    try:
+        _notify_entry_reversed()
     except Exception:
         pass
 

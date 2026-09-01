@@ -15691,7 +15691,7 @@ def _publish_atm_legs(api, spot, option_data, render_id):
 
     for store in ('_atm_leg_dfs', '_atm_leg_sids', '_atm_leg_vob_volume',
                   '_atm_leg_vidya', '_atm_leg_sr_behavior',
-                  '_atm_leg_ltf_delta'):
+                  '_atm_leg_ltf_delta', '_atm_leg_ltp'):
         st.session_state[store] = {}
 
     # The three builders Premium Structure needs for a strike outside ATM±1.
@@ -15745,6 +15745,15 @@ def _publish_atm_legs(api, spot, option_data, render_id):
             if sid:
                 st.session_state['_atm_leg_sids'][name] = (str(sid), seg)
             ltp = float(frame['close'].iloc[-1])
+            # 💰 The premium as a plain number, alongside the frame it came from.
+            #
+            # `_atm_leg_dfs` already carries it, but only as the last close of a
+            # DataFrame — so every consumer that wants "what is the ATM call
+            # worth right now" has to take a pandas dependency and re-do this
+            # index. The Alignment Checklist is a pure module and cannot, and
+            # the number is right here, already computed. Publish once, read
+            # anywhere (principle 3).
+            st.session_state['_atm_leg_ltp'][name] = ltp
             for store, fn in (('_atm_leg_vob_volume', analyze_vob_volume),
                               ('_atm_leg_sr_behavior', classify_leg_sr_behavior)):
                 try:
@@ -16266,6 +16275,20 @@ def _render_main_analyzer():
     # the bias dashboard, and it publishes `_market_picture`, which the Trade
     # Card immediately below reads. So the slot is claimed now and filled during
     # step 10 — the position moves, the order of computation does not.
+    #
+    # 🧭 The Market Alignment Checklist sits ABOVE the Trade Card — it is the
+    # "does everything agree?" read the card's verdict rests on, so it belongs
+    # in front of it rather than under two collapsed dashboards.
+    #
+    # ⚠️ Claimed here and FILLED LAST, after step 12. That is not a compromise,
+    # it is the only correct order: the checklist reads `_leg_profiles` (the
+    # HVP lines and the resolved call/put leg labels), which Dashboard V6
+    # publishes while it draws. Filling it at step 10 with the rest of the card
+    # stack would show last cycle's pivots beside this cycle's spot — the same
+    # staleness `_notify_poc_shifts` and `_notify_chart_formations` are placed
+    # after the V6 render to avoid. The position moves; the order of
+    # computation does not.
+    _alignment_container = st.container()
     _card_container = st.container()
     _picture_container = st.container()
     _v6_container = st.container()
@@ -16797,6 +16820,22 @@ def _render_main_analyzer():
                         pass
             except Exception as err:
                 st.caption(f"Dashboard V6 unavailable: {err}")
+
+    # 🧭 The Market Alignment Checklist — drawn into the slot claimed above the
+    # Trade Card, now that every producer it reads has run.
+    #
+    # It assembles; it does not compute. Regime, walls, S/R, POC, HVP, dealer
+    # posture, premium energy and each leg's own zones are read from the keys
+    # their owners published earlier in this cycle, and a check whose producer
+    # stayed quiet is rendered ❓ rather than given a stand-in value.
+    try:
+        from mios_v5.alignment import build as _build_alignment
+        from mios_v5.ui.alignment_panel import render as _render_alignment
+        _render_alignment(st, _build_alignment(st.session_state),
+                          slot=_alignment_container)
+    except Exception as err:
+        with _alignment_container:
+            st.caption(f"Market Alignment unavailable: {err}")
 
     # 📍 Dynamic-POC shift alerts. Placed AFTER the V6 render because the
     # terminal publishes `_leg_profiles` (the three charts' dynamic POC) while

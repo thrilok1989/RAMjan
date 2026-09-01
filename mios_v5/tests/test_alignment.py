@@ -921,3 +921,86 @@ def test_only_the_walls_escape_the_far_gate():
         row = _by_check(A.build(ss), check)
         assert row["align"] == BB.NEUTRAL, check
         assert "Far from" in row["position"], check
+
+
+# ── 13 · there is ONE war zone ──────────────────────────────────────────────
+#
+# Stage 35 publishes `battle_zone = {"type": "SUPPORT"|"RESISTANCE", "price"}`:
+# a single contested price and the side the fight is running from. The type is
+# not a property of the price — it flips when the fight does.
+#
+# The table had a "War Zone Support" row and a "War Zone Resistance" row, built
+# from `low`/`high` keys that do not exist on that object. The fallback fired on
+# every cycle and put the SAME price on two rows, voting in opposite directions.
+
+def _war(bz=None, winner=None, probs=None, spot=24302.0):
+    return A._final({"battle_zone": bz, "expected_winner": winner,
+                     "probabilities": probs or {}}, {}, spot, [])[0]
+
+
+def test_there_is_exactly_one_war_zone_row():
+    checks = [r["check"] for r in A.build(_ss())["rows"]]
+    assert checks.count("War Zone") == 1
+    assert "War Zone Support" not in checks
+    assert "War Zone Resistance" not in checks
+
+
+def test_the_battle_zone_has_no_band_to_split():
+    """The producer's own shape is the argument: one price, one type, no edges.
+    If Stage 35 ever grows a band this test fails and the split can be
+    reconsidered — until then, inventing one is fabricating a level."""
+    src = pathlib.Path(
+        A.__file__).parent.joinpath("engines/stage35_reaction_zone.py").read_text()
+    assert '"battle_zone": {"type": zone_type, "price": zone_price}' in src
+
+
+@pytest.mark.parametrize("kind,winner,expected", [
+    # the SAME support zone, read by who is winning the fight at it
+    ("SUPPORT", "Buyers (bounce)", BB.BULL),
+    ("SUPPORT", "Sellers (breakdown)", BB.BEAR),
+    # and the same resistance zone likewise
+    ("RESISTANCE", "Sellers (rejection)", BB.BEAR),
+    ("RESISTANCE", "Buyers (breakout)", BB.BULL),
+])
+def test_one_zone_changes_side_with_the_war(kind, winner, expected):
+    assert _war({"type": kind, "price": 24300}, winner)["align"] == expected
+
+
+def test_contested_is_an_answer_not_a_gap():
+    """Stage 35 declining to call the fight is a verdict. Falling through to
+    the hold/break rule would overrule the engine that just abstained."""
+    row = _war({"type": "SUPPORT", "price": 24300}, "Contested")
+    assert row["align"] == BB.NEUTRAL
+    assert "Contested" in row["remark"]
+
+
+def test_with_no_winner_the_zones_own_type_decides():
+    """Only when Stage 35 published no winner does the row fall back to what
+    price is doing at the level — and then the zone's `type`, not spot's side
+    of it, says whether holding is bullish."""
+    holding_support = _war({"type": "SUPPORT", "price": 24300}, None, spot=24320.0)
+    assert holding_support["align"] == BB.BULL
+    assert "fighting as support" in holding_support["remark"]
+
+    under_resistance = _war({"type": "RESISTANCE", "price": 24400}, None,
+                            spot=24380.0)
+    assert under_resistance["align"] == BB.BEAR
+    assert "fighting as resistance" in under_resistance["remark"]
+
+
+def test_the_row_says_which_side_the_zone_is_fighting_from():
+    """The type is the whole point of the row — a reader cannot interpret
+    "Buyers winning" without knowing what they are defending."""
+    assert "fighting as resistance" in _war(
+        {"type": "RESISTANCE", "price": 24400}, "Buyers (breakout)")["remark"]
+
+
+def test_price_inside_the_zone_is_marked_as_such():
+    assert "Inside war zone" in _war({"type": "SUPPORT", "price": 24300},
+                                     "Contested", spot=24302.0)["position"]
+
+
+def test_no_battle_zone_is_a_reported_absence():
+    row = _war(None, None)
+    assert row["align"] == A.NA
+    assert "not at a contested level" in row["remark"]

@@ -469,25 +469,17 @@ def _structure(ss: Mapping[str, Any], mp: Mapping[str, Any], spot: Optional[floa
         f"strength {_f(res.get('strength')) or _f(fr.get('resistance_strength')) or 0:.0f}%",
         "no resistance zone built"))
 
-    # War zone — the contested band. `low`/`high` when the zone carries them,
-    # otherwise the single battle price the Final Read published.
-    bz = _map(fr.get("battle_zone"))
-    bz_p = _f(bz.get("price"))
-    lo, hi = _f(bz.get("low")), _f(bz.get("high"))
-    if lo is None and hi is None and bz_p is not None:
-        lo = hi = bz_p
-    if lo is not None:
-        rows.append(_level_row(STRUCTURE, B_STRUCTURE, "War Zone Support", lo, spot,
-                               zones, "NIFTY", "support", "contested band floor"))
-    else:
-        rows.append(_na_row(STRUCTURE, B_STRUCTURE, "War Zone Support",
-                            "no battle zone in the Final Read"))
-    if hi is not None:
-        rows.append(_level_row(STRUCTURE, B_STRUCTURE, "War Zone Resistance", hi, spot,
-                               zones, "NIFTY", "resistance", "contested band ceiling"))
-    else:
-        rows.append(_na_row(STRUCTURE, B_STRUCTURE, "War Zone Resistance",
-                            "no battle zone in the Final Read"))
+    # ⚠️ There is no "War Zone Support" and "War Zone Resistance" row here, and
+    # there never should have been. Stage 35 publishes ONE battle zone —
+    # `{"type": "SUPPORT"|"RESISTANCE", "price": …}` — a single contested price
+    # whose side is decided by the fight, not a band with two edges. There are
+    # no `low`/`high` keys on it at all, so the fallback that split one price
+    # into two rows fired on every cycle and had the same number voting twice,
+    # once as a floor and once as a ceiling, in opposite directions.
+    #
+    # The single row lives in FINAL INTERACTION, where `_final` reads the
+    # zone's own `type` for which side it is fighting on and Stage 35's
+    # `expected_winner` for who is winning it.
 
     # POC — acceptance above value is bullish, below bearish. Same level rule.
     mf = _map(ss.get("_money_flow_data"))
@@ -904,24 +896,58 @@ def _premium(ss: Mapping[str, Any], zones: Sequence[Mapping[str, Any]]) -> List[
 
 def _final(fr: Mapping[str, Any], mp: Mapping[str, Any], spot: Optional[float],
            zones: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
-    """Who is winning the contested band — the Final Read's own verdict."""
+    """The war zone — ONE row, because there is one war zone.
+
+    Stage 35 publishes a single contested price and the side it is being fought
+    from: `battle_zone = {"type": "SUPPORT"|"RESISTANCE", "price": …}`. The
+    type is not a property of the price — it is which way the fight is running,
+    and it flips when the fight does. That is why this cannot be split into a
+    support row and a resistance row: there are not two levels, there is one
+    level with a changing role.
+
+    Two reads, in order:
+
+    1. **Who is winning**, from Stage 35's own `expected_winner` — "Buyers
+       (bounce)", "Sellers (rejection)", "Contested". This is the engine's
+       verdict on the war and it wins outright, including when it says
+       Contested: an engine declining to call a fight is an answer, not a gap
+       to fill.
+    2. **What price is doing at the level**, only when no winner was published
+       — the zone's own `type` decides whether holding reads bullish or
+       bearish, exactly as any other level would.
+    """
     bz = _map(fr.get("battle_zone"))
     price = _f(bz.get("price"))
     winner = fr.get("expected_winner")
+    kind = str(bz.get("type") or "").upper()
     if price is None and not winner:
         return [_na_row(FINAL, B_STRUCTURE, "War Zone",
                         "no battle zone — price is not at a contested level")]
-    if price is not None and spot is not None:
-        d = spot - price
-        pos = ("🟣 Inside war zone" if abs(d) <= AT_BAND else
-               f"🟢 Above {_rupees(price)} ({d:+,.0f})" if d > 0 else
-               f"🔴 Below {_rupees(price)} ({d:+,.0f})")
-    else:
-        pos = "—"
+
+    # The role the zone is currently fighting from. Falls back to spot's side
+    # of it if Stage 35 did not label it, which is the same inference the
+    # acceptance strip makes.
+    role = ("support" if kind == "SUPPORT" else
+            "resistance" if kind == "RESISTANCE" else
+            ("support" if (spot is not None and price is not None
+                           and spot >= price) else "resistance"))
+
+    text, holding, observed = _interaction(price, spot, zones, role)
+    if price is not None and spot is not None and abs(spot - price) <= AT_BAND:
+        text = f"🟣 Inside war zone {_rupees(price)}"
+
+    align = _bb.winner_bias(winner) if winner else _level_align(
+        "NIFTY", role, holding)
+
+    bits = [f"fighting as {role}"]
+    if winner:
+        bits.append(f"winner: {winner}")
+    probs = _map(fr.get("probabilities"))
+    if probs:
+        bits.append(" · ".join(f"{k} {v}%" for k, v in probs.items()))
     return [_row(FINAL, B_STRUCTURE, "War Zone",
-                 _rupees(price) if price is not None else "—", pos,
-                 _bb.winner_bias(winner),
-                 f"expected winner: {winner}" if winner else "contested — no winner called")]
+                 _rupees(price) if price is not None else "—", text, align,
+                 " · ".join(bits), observed)]
 
 
 # ── the summary ──────────────────────────────────────────────────────────────

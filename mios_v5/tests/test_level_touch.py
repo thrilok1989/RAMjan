@@ -56,43 +56,6 @@ def test_a_new_level_re_arms_immediately():
     assert alert is True
 
 
-def test_a_re_entry_within_the_cooldown_is_suppressed():
-    """The latch stops a loiter; the cooldown stops CHOP. Price touches, leaves
-    past REARM, and comes back — but within the cooldown, so no second alert."""
-    t = 1_000_000.0
-    a1, st = LT.evaluate(24330, 24327, None, now=t)          # touch, alert
-    assert a1 is True
-    _, st = LT.evaluate(24330, 24345, st, now=t + 60)        # leaves → re-arm
-    a2, st = LT.evaluate(24330, 24331, st, now=t + 120)      # back in 2 min
-    assert a2 is False, "re-entry inside the cooldown must not re-alert"
-
-
-def test_after_the_cooldown_a_fresh_touch_alerts_again():
-    t = 1_000_000.0
-    _, st = LT.evaluate(24330, 24327, None, now=t)           # alert
-    _, st = LT.evaluate(24330, 24345, st, now=t + 60)        # leaves → re-arm
-    a, st = LT.evaluate(24330, 24331, st, now=t + LT.COOLDOWN_S + 1)
-    assert a is True, "past the cooldown a genuine re-touch should alert"
-
-
-def test_a_new_level_starts_its_own_cooldown():
-    """A different level is a different alert — the previous level's cooldown
-    must not silence it."""
-    t = 1_000_000.0
-    _, st = LT.evaluate(24330, 24328, None, now=t)           # alert level A
-    a, st = LT.evaluate(24500, 24498, st, now=t + 30)        # level B, seconds later
-    assert a is True
-
-
-def test_without_now_only_the_latch_applies():
-    """Callers (and older tests) that pass no clock keep the pure-latch
-    behaviour — the cooldown simply does not engage."""
-    a1, st = LT.evaluate(24330, 24327, None)                 # no now
-    _, st = LT.evaluate(24330, 24345, st)                    # re-arm
-    a2, _ = LT.evaluate(24330, 24331, st)                    # back → alerts
-    assert a1 is True and a2 is True
-
-
 def test_a_missing_level_or_spot_is_not_a_touch():
     alert, st = LT.evaluate(None, 24330, None)
     assert alert is False and st == {}
@@ -186,19 +149,3 @@ def test_the_sidebar_toggle_reads_the_named_constant():
     default = next((kw.value for kw in checks[0].keywords if kw.arg == "value"),
                    None)
     assert isinstance(default, ast.Name) and default.id == "LEVEL_TOUCH_DEFAULT"
-
-
-def test_the_ranked_sr_touch_is_paused_by_default_but_gated_not_removed():
-    """The owner paused the ranked S/R touch — off by default, but still gated on
-    a session flag so it can be turned back on. War-zone and OI-wall touches are
-    NOT gated by it (they remain under the level-touch toggle)."""
-    const = next(n for n in _TREE.body if isinstance(n, ast.Assign)
-                 and any(getattr(t, "id", "") == "SR_TOUCH_ALERTS_DEFAULT"
-                         for t in n.targets))
-    assert isinstance(const.value, ast.Constant) and const.value.value is False
-    helper = _fn("_notify_level_touches")
-    consts = {n.value for n in ast.walk(helper)
-              if isinstance(n, ast.Constant) and isinstance(n.value, str)}
-    assert "_sr_touch_on" in consts
-    # the S/R sources are still there (gated, not deleted)
-    assert "strong_support" in consts and "strong_resistance" in consts

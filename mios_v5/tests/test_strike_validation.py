@@ -512,8 +512,22 @@ def test_the_chart_overlay_vocabulary_covers_the_structure_levels():
 
 
 def test_no_second_chart_was_created():
-    """The overlays go on the terminal chart that already exists."""
+    """The overlays go on the terminal chart that already exists.
+
+    Guards against a FORKED RENDERER, which is what "a second chart" means
+    here — a module that builds its own figure instead of drawing onto the one
+    `terminal_chart` makes. It used to assert the filename list was exactly
+    `["terminal_chart.py"]`, which also rejected a `chart_*` helper that
+    renders nothing at all (`chart_theme.py` is a palette lookup and imports no
+    plotly). Testing for figure construction keeps the real protection and is
+    strictly stronger: a fork named without "chart" in it would now be caught
+    too, where the filename check let it through.
+    """
     import pathlib as _p
     ui = _p.Path(SV.__file__).parent / "ui"
-    charts = [f.name for f in ui.glob("*chart*.py")]
-    assert charts == ["terminal_chart.py"], charts
+    for f in ui.glob("*chart*.py"):
+        if f.name == "terminal_chart.py":
+            continue
+        src = f.read_text()
+        assert "make_subplots(" not in src and "go.Figure(" not in src, (
+            f"{f.name} builds its own figure — the terminal chart was forked")

@@ -39,6 +39,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence
 
+from ..leg_keys import call_put as _call_put
+
 _UP, _DOWN = "#26a69a", "#ef5350"
 
 #: level → (colour, dash, width). Drawn on the NIFTY panel only.
@@ -1144,28 +1146,13 @@ def atm_legs(leg_dfs: Optional[Dict[str, Any]]):
     Keys look like `"ATM CE 23900"` / `"ATM+1 PE 24000"`. Exactly `ATM` wins;
     the nearest offset is a fallback so the terminal still draws something on a
     day the exact ATM leg failed to load.
+
+    ⚠️ The rule itself lives in `mios_v5.leg_keys` — it is about key NAMES, and
+    consumers that want a name (the Alignment Checklist reading `_atm_leg_ltp`)
+    should not have to hand this function a dict of DataFrames to get one.
     """
     legs = dict(leg_dfs or {})
     if not legs:
         return None, None, None, None
-
-    def pick(side):
-        exact = [k for k in legs if k.startswith("ATM ") and f" {side} " in k]
-        if exact:
-            return exact[0]
-        near = sorted((k for k in legs if f" {side} " in k),
-                      key=lambda k: abs(_offset(k)))
-        return near[0] if near else None
-
-    ce, pe = pick("CE"), pick("PE")
+    ce, pe = _call_put(legs.keys())
     return (legs.get(ce) if ce else None, legs.get(pe) if pe else None, ce, pe)
-
-
-def _offset(tag: str) -> int:
-    head = str(tag).split(" ")[0]
-    if head == "ATM":
-        return 0
-    try:
-        return int(head.replace("ATM", ""))
-    except ValueError:
-        return 99

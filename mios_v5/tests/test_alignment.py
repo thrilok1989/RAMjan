@@ -194,13 +194,14 @@ def test_a_level_with_no_observation_falls_back_to_geometry_and_says_so():
     assert "Below" in res["position"] or "Above" in res["position"]
 
 
-def test_a_far_level_is_neutral_rather_than_held_or_broken():
-    """A level 300 points away is neither respected nor broken. Calling it
-    either would be the invented claim this module exists to avoid."""
+def test_a_far_barrier_reads_as_room_not_as_a_hold_or_a_break():
+    """A resistance 300 points away is neither respected nor broken — but it is
+    not silent either. It is not in the way, and that is the read: room above.
+    The hold/break rule must not be what answers here."""
     read = A.build(_ss(_nifty_spot_live=24000.0, _la_zones_latest=[]))
     row = _by_check(read, "NIFTY Resistance")
-    assert "Far from" in row["position"]
-    assert row["align"] == BB.NEUTRAL
+    assert row["align"] == BB.BULL
+    assert "Clear of" in row["position"]
 
 
 def test_a_battle_zone_level_is_marked_as_one():
@@ -278,10 +279,11 @@ def test_leg_hvp_bands_scale_with_the_premium():
 
     cheap = _call_hvp(20.0, 32.0)      # ₹12 away — 60% of the premium
     rich = _call_hvp(300.0, 312.0)     # ₹12 away — 4% of the premium
-    assert "Far from" in cheap["position"]
-    assert cheap["align"] == BB.NEUTRAL
-    assert "Far from" not in rich["position"]
-    assert rich["align"] != BB.NEUTRAL
+    # the cheap leg is CLEAR of its pivot (room to run); the rich one is still
+    # underneath it and reads as a hold/break
+    assert "Clear of" in cheap["position"]
+    assert "Clear of" not in rich["position"]
+    assert "Below" in rich["position"]
 
     # And it is proportional at the tight end too: on the ₹300 leg a ₹1 gap is
     # inside the "at the line" band.
@@ -563,16 +565,20 @@ def test_both_columns_round_a_price_the_same_way():
     assert "₹30.90" in row["position"]
 
 
-def test_a_leg_zone_out_of_reach_does_not_vote():
-    """The serious one. `analyze_vob_volume`'s status describes what the flow
-    did INSIDE the zone — it is not a claim that price is interacting with it.
-    A CALL at ₹5.75 carried a zone at ₹84 still marked INTACT, and that voted
-    BEAR into the summary from fifteen times away."""
+def test_an_out_of_reach_zone_is_read_as_room_not_by_its_stale_status():
+    """The guard that still matters. `analyze_vob_volume`'s status describes
+    what the flow did INSIDE the zone — it is not a claim about a premium that
+    has since left it. A CALL at ₹5.75 carried a zone at ₹84 marked INTACT, and
+    quoting that as a live verdict voted BEAR from fifteen times away.
+
+    Under the room rule it votes BULL, for the opposite reason: the premium is
+    clear of that resistance. The status is not consulted at all, which is the
+    thing being asserted — the direction now comes from distance, not from a
+    reading of a zone price has left."""
     row = _by_check(A.build(_expiry_ss()), "CALL LTP Resistance")
-    assert row["align"] == BB.NEUTRAL, "an unreachable zone must abstain"
-    assert "Far from" in row["position"]
-    assert "not in play" in row["remark"]
-    # the levels are still REPORTED — abstaining is not hiding them
+    assert row["align"] == BB.BULL
+    assert "Clear of" in row["position"]
+    assert "intact" not in row["remark"].lower(), "stale status must not be quoted"
     assert "₹84.00" in row["value"]
 
 
@@ -597,7 +603,7 @@ def test_the_leg_bands_are_shared_by_the_zone_and_pivot_rows():
     (100.0, 99.9, (None, None)),        # inside the at-band — unsettled
     (100.0, 99.0, (A.ABOVE, True)),     # near and above
     (100.0, 101.0, (A.ABOVE, False)),   # near and below
-    (100.0, 20.0, (None, None)),        # 80% away — abstains
+    (100.0, 20.0, (A.FAR, None)),       # 80% away — not in the way
 ])
 def test_distance_reports_which_side_and_whether_it_counts(price, level, expected):
     """The verdict is a side, not a direction — `_holding` turns it into one
@@ -816,17 +822,24 @@ def test_the_reported_call_pivot_now_votes():
                         "call_label": "ATM CE 24050",
                         "put_label": "ATM PE 24050"})
     low = _by_check(A.build(ss), "CALL HVP LOW")
-    assert "Far from" not in low["position"]
-    assert low["align"] != BB.NEUTRAL
-    # the line 171% away is still out of reach and still abstains
-    assert _by_check(A.build(ss), "CALL HVP HIGH")["align"] == BB.NEUTRAL
+    assert "Clear of" not in low["position"]      # in play — read as a level
+    assert low["align"] == BB.BEAR                # premium under its own support
+    # the line 171% away is out of reach, and that is now its own read: the
+    # premium is clear of that resistance, so it has room above
+    high = _by_check(A.build(ss), "CALL HVP HIGH")
+    assert high["align"] == BB.BULL
+    assert "Clear of" in high["position"]
 
 
-def test_the_gate_still_excludes_what_it_was_built_for():
-    """Widening the band must not bring back the ₹84 zone on a ₹5.75 call."""
-    row = _by_check(A.build(_expiry_ss()), "CALL LTP Resistance")
-    assert row["align"] == BB.NEUTRAL
-    assert "not in play" in row["remark"]
+def test_a_zone_in_reach_is_read_by_its_status_and_one_out_of_reach_is_not():
+    """The band still decides WHICH rule answers, even though both now vote."""
+    near = _by_check(A.build(_expiry_ss(
+        _atm_leg_ltp={"ATM CE 24050": 83.0, "ATM PE 24050": 0.05})),
+        "CALL LTP Resistance")
+    far = _by_check(A.build(_expiry_ss()), "CALL LTP Resistance")
+    assert "Intact" in near["position"]        # status read
+    assert "Clear of" in far["position"]       # room read
+    assert near["align"] != far["align"]
 
 
 # ── 12 · an OI wall is ROOM, not a level price is holding or breaking ───────
@@ -908,16 +921,21 @@ def test_a_wall_does_not_go_through_the_hold_or_break_rule():
     assert "_wall_row(\"CALL Wall OI\"" in src
 
 
-def test_only_the_walls_escape_the_far_gate():
-    """S/R, POC, HVP and the gamma flip keep the far-gate: an untested line
-    price is nowhere near is not saying anything about direction yet. Only the
-    walls, which are read as room rather than as levels, always report."""
+def test_only_a_value_anchor_abstains_when_far():
+    """Barriers — S/R, walls, pivots, VOB zones — are things price can be CLEAR
+    of, so distance is a direction. A value anchor is not: being far above the
+    POC is bullish and far below it bearish, which is the position rule, and
+    running the room rule over it would report "no POC nearby" as a direction."""
     ss = {"_nifty_spot_live": 24380.0, "_market_picture": {"regime": "SIDEWAYS"},
           "_reaction_sr": {"support": {"price": 24000.0},
                            "resistance": {"price": 24800.0}},
           "_money_flow_data": {"poc_price": 24100.0},
           "_gex_data": {"gamma_flip_level": 24900.0}}
-    for check in ("NIFTY Support", "NIFTY Resistance", "NIFTY POC", "Gamma Flip"):
+    # barriers report
+    assert _by_check(A.build(ss), "NIFTY Resistance")["align"] == BB.BULL
+    assert _by_check(A.build(ss), "NIFTY Support")["align"] == BB.BEAR
+    # value / regime anchors keep the position rule and abstain when far
+    for check in ("NIFTY POC", "Gamma Flip"):
         row = _by_check(A.build(ss), check)
         assert row["align"] == BB.NEUTRAL, check
         assert "Far from" in row["position"], check
@@ -1004,3 +1022,110 @@ def test_no_battle_zone_is_a_reported_absence():
     row = _war(None, None)
     assert row["align"] == A.NA
     assert "not at a contested level" in row["remark"]
+
+
+# ── 14 · a barrier price is clear of is a direction, on every axis ──────────
+#
+# "if the resistance is far from LTP then that LTP is bull, and if put is bull
+# nifty is bear — same for call, and for support, and for hvp."
+#
+# The same room rule the OI walls use, now on the leg's own premium axis and on
+# the index. `bias_ball` still owns the last step, so a PUT inverts on the way
+# out: a put with room for its premium to rise is NIFTY falling.
+
+@pytest.mark.parametrize("chart,role,expected", [
+    # a resistance the price is clear of → room to rise on that axis
+    ("NIFTY", "resistance", BB.BULL),
+    ("CALL", "resistance", BB.BULL),    # call premium free to rise → NIFTY up
+    ("PUT", "resistance", BB.BEAR),     # put premium free to rise → NIFTY down
+    # a support far from price → nothing holding that axis up
+    ("NIFTY", "support", BB.BEAR),
+    ("CALL", "support", BB.BEAR),
+    ("PUT", "support", BB.BULL),        # put premium unsupported → NIFTY up
+])
+def test_room_is_the_inverse_of_the_level_constraining_price(chart, role, expected):
+    assert A._room_align(chart, role) == expected
+    # and it is exactly "the level is not holding it in", not a new formula
+    assert A._room_align(chart, role) == A._level_align(chart, role, False)
+
+
+def test_room_is_side_independent():
+    """A resistance far ABOVE is headroom; a resistance far BELOW has already
+    been broken through. Both say the price is free to go up."""
+    def _res(spot):
+        ss = {"_nifty_spot_live": float(spot),
+              "_market_picture": {"regime": "SIDEWAYS"},
+              "_reaction_sr": {"resistance": {"price": 24400.0},
+                               "support": {"price": 20000.0}}}
+        return _by_check(A.build(ss), "NIFTY Resistance")["align"]
+    assert _res(24000) == _res(24800) == BB.BULL
+
+
+@pytest.mark.parametrize("check,ltp,level,side,expected", [
+    # the reported rows, on the reported numbers
+    ("CALL LTP Resistance", 5.75, 84.36, None, BB.BULL),
+    ("PUT LTP Resistance", 0.05, 33.80, None, BB.BEAR),
+    ("CALL HVP HIGH", 5.75, 15.60, "HIGH", BB.BULL),
+    ("PUT HVP HIGH", 0.05, 30.90, "HIGH", BB.BEAR),
+])
+def test_a_far_leg_level_votes_through_the_leg_inversion(
+        check, ltp, level, side, expected):
+    is_call = check.startswith("CALL")
+    ce, pe = ("ATM CE 24050", "ATM PE 24050")
+    zones = {"zone_type": "bearish", "mid": level, "status": "INTACT",
+             "dominant": "balanced", "bull_pct": 50}
+    ss = {"_nifty_spot_live": 24055.0, "_market_picture": {"regime": "SIDEWAYS"},
+          "_atm_leg_ltp": {ce: 5.75, pe: 0.05},
+          "_atm_leg_vob_volume": {(ce if is_call else pe): [zones]},
+          "_leg_profiles": {
+              ("CALL" if is_call else "PUT"): {
+                  "hv_points": [{"price": level, "side": side}]} if side else {},
+              "call_label": ce, "put_label": pe}}
+    assert _by_check(A.build(ss), check)["align"] == expected
+
+
+def test_a_value_anchor_is_not_a_barrier():
+    """POC and the gamma flip keep the position rule. Being far above value is
+    bullish and far below it bearish — running the room rule over them would
+    report "no POC nearby" as a direction, which is meaningless."""
+    ss = {"_nifty_spot_live": 24380.0, "_market_picture": {"regime": "SIDEWAYS"},
+          "_money_flow_data": {"poc_price": 24100.0},
+          "_gex_data": {"gamma_flip_level": 24900.0}}
+    for check in ("NIFTY POC", "Gamma Flip"):
+        assert _by_check(A.build(ss), check)["align"] == BB.NEUTRAL, check
+
+
+def test_at_a_level_is_still_contested():
+    """Only FAR gets the room read. Price sitting ON a level is genuinely
+    undecided, and turning that into a direction would be the invention this
+    module refuses to make."""
+    ss = {"_nifty_spot_live": 24398.0, "_market_picture": {"regime": "SIDEWAYS"},
+          "_reaction_sr": {"resistance": {"price": 24400.0},
+                           "support": {"price": 20000.0}}}
+    row = _by_check(A.build(ss), "NIFTY Resistance")
+    assert row["align"] == BB.NEUTRAL
+    assert "At" in row["position"]
+
+
+def test_the_far_wording_says_why_it_is_coloured():
+    """"🟢 Far from ₹84.36" states the geometry and hides the reason. A reader
+    cannot tell why a green ball sits beside "far from"."""
+    ss = {"_nifty_spot_live": 24000.0, "_market_picture": {"regime": "SIDEWAYS"},
+          "_reaction_sr": {"resistance": {"price": 24400.0},
+                           "support": {"price": 23000.0}}}
+    assert "Clear of" in _by_check(A.build(ss), "NIFTY Resistance")["position"]
+    assert "Unsupported" in _by_check(A.build(ss), "NIFTY Support")["position"]
+
+
+def test_the_walls_and_the_barriers_agree_on_the_rule():
+    """The walls got this rule first and keep their own wording; the shared
+    logic must still give the same answer, or two rows describing the same
+    geometry would disagree."""
+    # a CE wall far away and a resistance far away are the same claim
+    ss = {"_nifty_spot_live": 24000.0, "_market_picture":
+          {"regime": "SIDEWAYS", "oi_ceiling": (24400, 9e4)},
+          "_reaction_sr": {"resistance": {"price": 24400.0},
+                           "support": {"price": 20000.0}}}
+    read = A.build(ss)
+    assert _by_check(read, "CALL Wall OI")["align"] == BB.BULL
+    assert _by_check(read, "NIFTY Resistance")["align"] == BB.BULL

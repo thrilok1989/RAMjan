@@ -134,8 +134,13 @@ NEAR_BAND = 25.0
 #: `ABOVE` — a statement about PRICE's side of the level, which means opposite
 #:           things for the two roles. Price above a support is that support
 #:           holding; price above a resistance is that resistance BROKEN.
+#: `FAR`  — price is nowhere near the level. Not a hold and not a break; the
+#:           level is simply not in the way. For a BARRIER that is a direction
+#:           of its own (see `_room_align`), and for a value anchor it is
+#:           nothing at all.
 HELD = "held"
 ABOVE = "above"
+FAR = "far"
 
 #: `level_acceptance` observed state → (icon, phrase, (kind, value)).
 #:
@@ -179,6 +184,8 @@ def _holding(role: Optional[str], verdict: Tuple[Optional[str], Optional[bool]]
         return None
     if kind == HELD:
         return value
+    if kind == FAR:                     # neither held nor broken — see _resolve
+        return None
     return value if _is_support(role) else (not value)
 
 
@@ -298,19 +305,22 @@ def _positional(level: Optional[float], spot: Optional[float]
     if abs(d) <= AT_BAND:
         return f"🟡 At {_rupees(level)}", (None, None)
     if abs(d) > NEAR_BAND:
-        return f"⚪ Far from {_rupees(level)} ({d:+,.0f})", (None, None)
+        return f"⚪ Far from {_rupees(level)} ({d:+,.0f})", (FAR, None)
     return ((f"🟢 Above {_rupees(level)} ({d:+,.0f})", (ABOVE, True)) if d > 0
             else (f"🔴 Below {_rupees(level)} ({d:+,.0f})", (ABOVE, False)))
 
 
 def _interaction(level: Optional[float], spot: Optional[float],
                  zones: Sequence[Mapping[str, Any]], role: Optional[str] = None
-                 ) -> Tuple[str, Optional[bool], bool]:
-    """The third column: `(text, holding, observed)`.
+                 ) -> Tuple[str, Tuple[Optional[str], Optional[bool]], bool]:
+    """The third column: `(text, verdict, observed)`.
 
-    `role` is what the level is acting as — a support or a resistance — and is
-    required to answer "did it hold": both sources report which SIDE of the
-    level price is on, and that means opposite things for the two roles.
+    ⚠️ The VERDICT is returned, not a resolved boolean. Collapsing it here threw
+    away the difference between "price is sitting on this level, undecided" and
+    "price is nowhere near it" — both arrived as None, and a barrier price is
+    clear of has a direction while a level price is testing does not. Only
+    `_resolve` gets to flatten it, because only the caller knows whether the
+    level is a barrier.
 
     `observed` says which of the two sources answered — True when
     `level_acceptance` had a verdict for this level, False when this is the
@@ -324,13 +334,37 @@ def _interaction(level: Optional[float], spot: Optional[float],
             str(z.get("observed") or ""), ("", "", (None, None)))
         if phrase:
             war = " · in war zone" if z.get("is_battle_zone") else ""
-            return (f"{icon} {phrase} {_rupees(level)}{war}",
-                    _holding(role, verdict), True)
+            return f"{icon} {phrase} {_rupees(level)}{war}", verdict, True
     text, verdict = _positional(level, spot)
-    return text, _holding(role, verdict), False
+    return text, verdict, False
 
 
 # ── the alignment column ─────────────────────────────────────────────────────
+
+def _room_align(chart: str, role: str) -> str:
+    """A BARRIER that is nowhere near price — what the absence of it means.
+
+    The same rule the OI walls use, on whatever axis the level lives:
+
+        a cap far away        → room to run      → the leg (or index) is free
+        a floor far away      → nothing beneath  → it is unsupported
+
+    which is exactly the inverse of that level constraining price, so it is
+    `_level_align(..., holding=False)` — and `bias_ball` still owns the last
+    step, so a PUT leg inverts on the way out. A CALL whose resistance is far
+    has room for its premium to rise, which is bullish for NIFTY; a PUT whose
+    resistance is far has room for ITS premium to rise, which is bearish.
+
+    ⚠️ Side-independent, and that is not an oversight. A resistance far ABOVE
+    the price is headroom and a resistance far BELOW it has already been broken
+    through — both say the same thing about where the price is free to go.
+
+    Only for barriers. A value anchor (POC) or a regime line (the gamma flip)
+    is not something price is "clear of" — being far above value is bullish and
+    far below it bearish, which is the position rule, not this one.
+    """
+    return _level_align(chart, role, False)
+
 
 def _level_align(chart: str, role: str, holding: Optional[bool]) -> str:
     """A level's direction for NIFTY, given what price did to it.
@@ -351,6 +385,46 @@ def _level_align(chart: str, role: str, holding: Optional[bool]) -> str:
     return BEAR if natural == BULL else BULL
 
 
+def _room_text(level: Optional[float], price: Optional[float],
+               role: str) -> str:
+    """How a barrier price is clear of should read.
+
+    "🟢 Far from ₹84.36" states the geometry and hides the reason — a green ball
+    beside "far from" tells the reader nothing about why it is green. The walls
+    already say what they ARE from here ("Cap clear", "Floor distant"); every
+    other barrier now does too.
+    """
+    gap = abs((level or 0.0) - (price or 0.0))
+    if _is_support(role):
+        return f"Unsupported · ₹{level:,.2f} is {gap:,.2f} away" \
+            if (level or 0) < _INDEX_SCALE else \
+            f"Unsupported · {_rupees(level)} is {gap:,.0f} away"
+    return f"Clear of {_rupees(level)} ({gap:,.2f} away)" \
+        if (level or 0) < _INDEX_SCALE else \
+        f"Clear of {_rupees(level)} ({gap:,.0f} away)"
+
+
+def _resolve(chart: str, role: str,
+             verdict: Tuple[Optional[str], Optional[bool]],
+             barrier: bool) -> str:
+    """Verdict → alignment. The one place the three cases meet.
+
+    * held / broken / above / below → `_level_align`, the hold-or-break rule
+    * FAR on a **barrier**         → `_room_align`, the not-in-the-way rule
+    * FAR on anything else, or an unsettled verdict → NEUTRAL
+
+    `barrier` is the caller saying "this level is something price can be
+    clear of": the OI walls, S/R, the VOB zones, the high-volume pivots.
+    A value anchor is not — being far above POC is bullish and far below it
+    bearish, which is the position rule, and running the room rule over it
+    would report "no POC nearby" as a direction.
+    """
+    kind, _ = verdict
+    if kind == FAR:
+        return _room_align(chart, role) if barrier else NEUTRAL
+    return _level_align(chart, role, _holding(role, verdict))
+
+
 def _row(group: str, bucket: str, check: str, value: str, position: str,
          align: str, remark: str = "", observed: bool = True) -> Dict[str, Any]:
     return {"group": group, "bucket": bucket, "check": check, "value": value,
@@ -368,13 +442,22 @@ def _na_row(group: str, bucket: str, check: str, why: str) -> Dict[str, Any]:
 def _level_row(group: str, bucket: str, check: str, level: Optional[float],
                spot: Optional[float], zones: Sequence[Mapping[str, Any]],
                chart: str, role: str, remark: str = "",
-               missing: str = "not published this cycle") -> Dict[str, Any]:
-    """One S/R-shaped row: a price, what spot is doing at it, what that means."""
+               missing: str = "not published this cycle",
+               barrier: bool = True) -> Dict[str, Any]:
+    """One S/R-shaped row: a price, what spot is doing at it, what that means.
+
+    `barrier` says whether the level is something price can be *clear of* — see
+    `_resolve`. True for S/R and pivots; False for a value anchor like the POC,
+    where distance means nothing and only the side matters.
+    """
     if level is None:
         return _na_row(group, bucket, check, missing)
-    text, holding, observed = _interaction(level, spot, zones, role)
-    return _row(group, bucket, check, _rupees(level), text,
-                _level_align(chart, role, holding), remark, observed)
+    text, verdict, observed = _interaction(level, spot, zones, role)
+    align = _resolve(chart, role, verdict, barrier)
+    if barrier and verdict[0] == FAR:
+        text = f"{BALLS.get(align, '⚪')} {_room_text(level, spot, role)}"
+    return _row(group, bucket, check, _rupees(level), text, align, remark,
+                observed)
 
 
 def _wall_row(check: str, level: Optional[float], spot: Optional[float],
@@ -486,7 +569,7 @@ def _structure(ss: Mapping[str, Any], mp: Mapping[str, Any], spot: Optional[floa
     rows.append(_level_row(STRUCTURE, B_STRUCTURE, "NIFTY POC",
                            _f(mf.get("poc_price")), spot, zones,
                            "NIFTY", "support", "session value — acceptance vs rejection",
-                           "no session profile"))
+                           "no session profile", barrier=False))
 
     # HVP lines, both sides, shown together. A swing HIGH is resistance and a
     # LOW is support — `bias_ball.hvp_bias` owns that mapping; here the nearest
@@ -501,9 +584,12 @@ def _structure(ss: Mapping[str, Any], mp: Mapping[str, Any], spot: Optional[floa
                                 "no high-volume pivots on the index frame"))
             continue
         nearest = _nearest_to(pts, spot)
-        text, holding, observed = _interaction(nearest, spot, zones, role)
+        text, verdict, observed = _interaction(nearest, spot, zones, role)
+        _al = _resolve("NIFTY", role, verdict, True)
+        if verdict[0] == FAR:
+            text = f"{BALLS.get(_al, '⚪')} {_room_text(nearest, spot, role)}"
         rows.append(_row(STRUCTURE, B_STRUCTURE, check, _levels_text(_by_distance(pts, spot)),
-                         text, _level_align("NIFTY", role, holding),
+                         text, _al,
                          f"{len(pts)} pivot line(s) · nearest {_rupees(nearest)}", observed))
 
     # ── dealer posture ──
@@ -512,7 +598,7 @@ def _structure(ss: Mapping[str, Any], mp: Mapping[str, Any], spot: Optional[floa
                            _f(gx.get("gamma_flip_level")), spot, zones,
                            "NIFTY", "support",
                            "above flip = dealers dampen, below = they amplify",
-                           "no gamma flip published"))
+                           "no gamma flip published", barrier=False))
 
     tg = _f(gx.get("total_gex"))
     if tg is not None:
@@ -652,7 +738,7 @@ def _distance_word(price: float, level: float, at: float, near: float
     if gap <= at:
         return "🟡", "At", (None, None)
     if gap > near:
-        return "⚪", "Far from", (None, None)
+        return "⚪", "Far from", (FAR, None)
     return (("🟢", "Above", (ABOVE, True)) if price > level
             else ("🔴", "Below", (ABOVE, False)))
 
@@ -831,17 +917,21 @@ def _premium(ss: Mapping[str, Any], zones: Sequence[Mapping[str, Any]]) -> List[
             # perfectly true, and fifteen times away from any price the leg can
             # reach. Taken as a live read it voted BEAR into the summary.
             #
-            # So a zone outside the leg's own near band reports its distance and
-            # abstains, exactly as the index rows and the leg HVP rows already
-            # do. Every other level in this table is gated this way; this one
-            # was not, and it was the only one that could vote from that far
-            # out.
+            # A zone outside the leg's own near band is not doing anything to
+            # the premium, and `_room_align` turns that absence into the read it
+            # is: a resistance the premium is clear of is room for it to rise; a
+            # support far below it is nothing holding it up. The zone's own
+            # `status` is deliberately dropped here — it describes flow INSIDE a
+            # zone the price has left, and quoting it as a live verdict is what
+            # had a ₹5.75 call voting on an ₹84 level.
             if mid is None or abs(mid - ltp) > _near:
-                icon, word, _verdict = _distance_word(ltp, mid or 0.0, _at, _near)
-                holding = _holding(role, _verdict)
-                position = f"{icon} {word} {_rupees(mid)}"
-                remark = (f"zone {status.lower() or 'unclassified'}, but "
-                          f"{abs((mid or 0) - ltp):,.2f} away — not in play")
+                _, _, _verdict = _distance_word(ltp, mid or 0.0, _at, _near)
+                align = _resolve(chart, role, _verdict, True)
+                position = f"{BALLS.get(align, '⚪')} {_room_text(mid, ltp, role)}"
+                remark = (f"premium is clear of it by "
+                          f"{abs((mid or 0) - ltp):,.2f} — "
+                          + ("room above" if not _is_support(role)
+                             else "nothing beneath"))
             else:
                 # BUILDING / INTACT = the zone is doing its job; BREAKING = it
                 # failed; FADING = flow turned against it but it has not gone.
@@ -853,9 +943,10 @@ def _premium(ss: Mapping[str, Any], zones: Sequence[Mapping[str, Any]]) -> List[
                             f"{_rupees(mid)}")
                 remark = (f"{nearest.get('dominant') or '—'} dominant · "
                           f"{_f(nearest.get('bull_pct')) or 0:.0f}% buy volume")
+                align = _level_align(chart, role, holding)
             rows.append(_row(
                 PREMIUM, B_OPTIONS, check, _levels_text(_by_distance(mids, ltp), 2),
-                position, _level_align(chart, role, holding), remark))
+                position, align, remark))
 
         # The premium itself. Reported, never scored: a price is not a
         # direction, and the leg's S/R rows above are where its behaviour votes.
@@ -883,13 +974,15 @@ def _premium(ss: Mapping[str, Any], zones: Sequence[Mapping[str, Any]]) -> List[
             nearest = _nearest_to(pts, ltp)
             _at, _near = _leg_bands(ltp)
             icon, word, _verdict = _distance_word(ltp, nearest or 0.0, _at, _near)
-            holding = _holding(role, _verdict)
+            # `hvp_bias` owns HIGH→resistance / LOW→support plus the PUT
+            # inversion; `_resolve` adds the hold/break flip when the premium is
+            # at the line, and the room read when it is clear of it.
+            align = _resolve(chart, role, _verdict, True)
+            _pos = (_room_text(nearest, ltp, role) if _verdict[0] == FAR
+                    else f"{word} {_rupees(nearest)}")
             rows.append(_row(
                 PREMIUM, B_OPTIONS, check, _levels_text(_by_distance(pts, ltp), 2),
-                f"{icon} {word} {_rupees(nearest)}",
-                # `hvp_bias` owns HIGH→resistance / LOW→support plus the PUT
-                # inversion; the hold/break flip is applied on top of it.
-                _level_align(chart, role, holding),
+                f"{BALLS.get(align, icon)} {_pos}", align,
                 f"LTP {_rupees(ltp)} · {len(pts)} line(s)", observed=False))
     return rows
 
@@ -932,12 +1025,12 @@ def _final(fr: Mapping[str, Any], mp: Mapping[str, Any], spot: Optional[float],
             ("support" if (spot is not None and price is not None
                            and spot >= price) else "resistance"))
 
-    text, holding, observed = _interaction(price, spot, zones, role)
+    text, verdict, observed = _interaction(price, spot, zones, role)
     if price is not None and spot is not None and abs(spot - price) <= AT_BAND:
         text = f"🟣 Inside war zone {_rupees(price)}"
 
-    align = _bb.winner_bias(winner) if winner else _level_align(
-        "NIFTY", role, holding)
+    align = (_bb.winner_bias(winner) if winner
+             else _resolve("NIFTY", role, verdict, True))
 
     bits = [f"fighting as {role}"]
     if winner:

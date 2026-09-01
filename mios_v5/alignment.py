@@ -110,19 +110,61 @@ AT_BAND = 5.0
 #: beyond this, a level is not in play at all — "far from level".
 NEAR_BAND = 25.0
 
-#: `level_acceptance` observed state → (icon, phrase, holding?).
+#: how a verdict is expressed. The distinction is the whole correctness of the
+#: alignment column, so it is named rather than left implicit:
 #:
-#: `holding` is the third value: True when price respected the level, False when
-#: it went through, None while the market has not settled it. `_level_align`
-#: turns that into a direction; nothing else in this module reads the raw word.
+#: `HELD`  — a statement about the LEVEL, true whatever its role. "Price was
+#:           rejected here" means the level did its job whether it is support or
+#:           resistance.
+#: `ABOVE` — a statement about PRICE's side of the level, which means opposite
+#:           things for the two roles. Price above a support is that support
+#:           holding; price above a resistance is that resistance BROKEN.
+HELD = "held"
+ABOVE = "above"
+
+#: `level_acceptance` observed state → (icon, phrase, (kind, value)).
+#:
+#: ⚠️ `ACCEPTED_ABOVE` is not "the level held". It is "price settled above the
+#: level", and what that means depends entirely on which side the level was
+#: acting from. Recording both families as one boolean is what made every
+#: resistance row vote backwards.
 _OBSERVED = {
-    "ACCEPTED_ABOVE": ("🟢", "Accepted above", True),
-    "ACCEPTED_BELOW": ("🔴", "Accepted below", False),
-    "REJECTED": ("🔴", "Rejecting", True),
-    "TESTING": ("🟡", "Testing", None),
-    "BREAK_ATTEMPT": ("🟠", "Breaking", False),
-    "FAILED_BREAK_WAIT": ("🟡", "Failed break", None),
+    "ACCEPTED_ABOVE": ("🟢", "Accepted above", (ABOVE, True)),
+    "ACCEPTED_BELOW": ("🔴", "Accepted below", (ABOVE, False)),
+    "REJECTED": ("🔴", "Rejecting", (HELD, True)),
+    "BREAK_ATTEMPT": ("🟠", "Breaking", (HELD, False)),
+    "TESTING": ("🟡", "Testing", (None, None)),
+    "FAILED_BREAK_WAIT": ("🟡", "Failed break", (None, None)),
 }
+
+
+def _is_support(role: Optional[str]) -> bool:
+    """Whether a role acts from below. `bias_ball` accepts the VOB spellings
+    too, so they are normalised the same way here."""
+    r = str(role or "").lower()
+    return r in ("support", "bullish")
+
+
+def _holding(role: Optional[str], verdict: Tuple[Optional[str], Optional[bool]]
+             ) -> Optional[bool]:
+    """Did the level hold, given a verdict and the role it was acting in?
+
+    ⚠️ This is the fix for every resistance row voting backwards.
+
+    A `HELD` verdict is already role-independent and passes through. An `ABOVE`
+    verdict has to be resolved against the role, because the two are mirrors: a
+    support holds while price is above it, a resistance holds while price is
+    below. Treating `above` as `holding` — which every call site did — is right
+    for supports and exactly inverted for resistances, so a resistance price had
+    just broken to the upside reported as bearish, and one price was respectfully
+    sitting under reported as bullish.
+    """
+    kind, value = verdict
+    if kind is None or value is None:
+        return None
+    if kind == HELD:
+        return value
+    return value if _is_support(role) else (not value)
 
 
 # ── small readers ────────────────────────────────────────────────────────────
@@ -222,28 +264,38 @@ def _zone_for(level: Optional[float], zones: Sequence[Mapping[str, Any]],
     return best
 
 
-def _positional(level: Optional[float], spot: Optional[float]) -> Tuple[str, Optional[bool]]:
+def _positional(level: Optional[float], spot: Optional[float]
+                ) -> Tuple[str, Tuple[Optional[str], Optional[bool]]]:
     """Where spot sits relative to a level, when nothing observed its behaviour.
 
     Deliberately weaker language than `_OBSERVED`: this says where price *is*,
-    never what it *did*. `holding` is None for the far case — a level price is
-    nowhere near is neither held nor broken, and reporting it as either would be
-    the invented claim this module refuses to make.
+    never what it *did* — so the verdict it returns is an `ABOVE`, and only the
+    caller, which knows the level's role, can turn that into "holding".
+
+    The verdict is empty for the at-band and the far case. A level price is
+    sitting exactly on is not yet decided, and one it is nowhere near is neither
+    held nor broken; reporting either as a direction would be the invented claim
+    this module refuses to make.
     """
     if level is None or spot is None:
-        return "—", None
+        return "—", (None, None)
     d = spot - level
     if abs(d) <= AT_BAND:
-        return f"🟡 At {_rupees(level)}", None
+        return f"🟡 At {_rupees(level)}", (None, None)
     if abs(d) > NEAR_BAND:
-        return f"⚪ Far from {_rupees(level)} ({d:+,.0f})", None
-    return ((f"🟢 Above {_rupees(level)} ({d:+,.0f})", True) if d > 0
-            else (f"🔴 Below {_rupees(level)} ({d:+,.0f})", False))
+        return f"⚪ Far from {_rupees(level)} ({d:+,.0f})", (None, None)
+    return ((f"🟢 Above {_rupees(level)} ({d:+,.0f})", (ABOVE, True)) if d > 0
+            else (f"🔴 Below {_rupees(level)} ({d:+,.0f})", (ABOVE, False)))
 
 
 def _interaction(level: Optional[float], spot: Optional[float],
-                 zones: Sequence[Mapping[str, Any]]) -> Tuple[str, Optional[bool], bool]:
+                 zones: Sequence[Mapping[str, Any]], role: Optional[str] = None
+                 ) -> Tuple[str, Optional[bool], bool]:
     """The third column: `(text, holding, observed)`.
+
+    `role` is what the level is acting as — a support or a resistance — and is
+    required to answer "did it hold": both sources report which SIDE of the
+    level price is on, and that means opposite things for the two roles.
 
     `observed` says which of the two sources answered — True when
     `level_acceptance` had a verdict for this level, False when this is the
@@ -253,13 +305,14 @@ def _interaction(level: Optional[float], spot: Optional[float],
     """
     z = _zone_for(level, zones)
     if z is not None:
-        icon, phrase, holding = _OBSERVED.get(
-            str(z.get("observed") or ""), ("", "", None))
+        icon, phrase, verdict = _OBSERVED.get(
+            str(z.get("observed") or ""), ("", "", (None, None)))
         if phrase:
             war = " · in war zone" if z.get("is_battle_zone") else ""
-            return f"{icon} {phrase} {_rupees(level)}{war}", holding, True
-    text, holding = _positional(level, spot)
-    return text, holding, False
+            return (f"{icon} {phrase} {_rupees(level)}{war}",
+                    _holding(role, verdict), True)
+    text, verdict = _positional(level, spot)
+    return text, _holding(role, verdict), False
 
 
 # ── the alignment column ─────────────────────────────────────────────────────
@@ -304,7 +357,7 @@ def _level_row(group: str, bucket: str, check: str, level: Optional[float],
     """One S/R-shaped row: a price, what spot is doing at it, what that means."""
     if level is None:
         return _na_row(group, bucket, check, missing)
-    text, holding, observed = _interaction(level, spot, zones)
+    text, holding, observed = _interaction(level, spot, zones, role)
     return _row(group, bucket, check, _rupees(level), text,
                 _level_align(chart, role, holding), remark, observed)
 
@@ -477,7 +530,7 @@ def _structure(ss: Mapping[str, Any], mp: Mapping[str, Any], spot: Optional[floa
                                 "no high-volume pivots on the index frame"))
             continue
         nearest = _nearest_to(pts, spot)
-        text, holding, observed = _interaction(nearest, spot, zones)
+        text, holding, observed = _interaction(nearest, spot, zones, role)
         rows.append(_row(STRUCTURE, B_STRUCTURE, check, _levels_text(_by_distance(pts, spot)),
                          text, _level_align("NIFTY", role, holding),
                          f"{len(pts)} pivot line(s) · nearest {_rupees(nearest)}", observed))
@@ -592,21 +645,36 @@ def _leg_bands(ltp: float) -> Tuple[float, float]:
     Index points cannot be reused here: ₹5 is a touch on a ₹300 leg and a
     different world on a ₹20 one. The floors keep a near-worthless expiry-day
     leg from having a band of nothing.
+
+    ⚠️ The near band is 5% of the premium, not the 2% it started at. Two per
+    cent of an option is about one minute's movement — a ₹100 leg travels ₹2
+    without anything happening — so nearly every pivot and zone fell outside it
+    and abstained, and the summary filled up with ⚪ from rows that had a
+    perfectly good read. Five per cent is still a tight window, and still
+    excludes by a wide margin the case this gate exists for: a ₹5.75 leg
+    carrying a stale zone at ₹84.
     """
-    return max(ltp * 0.005, 0.25), max(ltp * 0.02, 0.5)
+    return max(ltp * 0.005, 0.25), max(ltp * 0.05, 0.5)
 
 
-def _distance_word(price: float, level: float, at: float,
-                   near: float) -> Tuple[str, str, Optional[bool]]:
-    """`(icon, word, holding)` for a price against a level it may be nowhere
-    near. `holding` is None unless the level is close enough to be in play —
-    which is what keeps an unreachable level from casting a vote."""
+def _distance_word(price: float, level: float, at: float, near: float
+                   ) -> Tuple[str, str, Tuple[Optional[str], Optional[bool]]]:
+    """`(icon, word, verdict)` for a price against a level it may be nowhere
+    near.
+
+    The verdict is an `ABOVE` — which side of the level price is on — and is
+    empty unless the level is close enough to be in play. Resolving it into
+    "holding" needs the role and belongs to `_holding`; returning it as a bare
+    boolean is what let a leg's resistance rows read backwards, exactly as the
+    index rows did.
+    """
     gap = abs(price - level)
     if gap <= at:
-        return "🟡", "At", None
+        return "🟡", "At", (None, None)
     if gap > near:
-        return "⚪", "Far from", None
-    return ("🟢", "Above", True) if price > level else ("🔴", "Below", False)
+        return "⚪", "Far from", (None, None)
+    return (("🟢", "Above", (ABOVE, True)) if price > level
+            else ("🔴", "Below", (ABOVE, False)))
 
 
 def _prefer_align(preferred: Optional[str], ce_e: Optional[float],
@@ -789,7 +857,8 @@ def _premium(ss: Mapping[str, Any], zones: Sequence[Mapping[str, Any]]) -> List[
             # was not, and it was the only one that could vote from that far
             # out.
             if mid is None or abs(mid - ltp) > _near:
-                icon, word, holding = _distance_word(ltp, mid or 0.0, _at, _near)
+                icon, word, _verdict = _distance_word(ltp, mid or 0.0, _at, _near)
+                holding = _holding(role, _verdict)
                 position = f"{icon} {word} {_rupees(mid)}"
                 remark = (f"zone {status.lower() or 'unclassified'}, but "
                           f"{abs((mid or 0) - ltp):,.2f} away — not in play")
@@ -833,7 +902,8 @@ def _premium(ss: Mapping[str, Any], zones: Sequence[Mapping[str, Any]]) -> List[
                 continue
             nearest = _nearest_to(pts, ltp)
             _at, _near = _leg_bands(ltp)
-            icon, word, holding = _distance_word(ltp, nearest or 0.0, _at, _near)
+            icon, word, _verdict = _distance_word(ltp, nearest or 0.0, _at, _near)
+            holding = _holding(role, _verdict)
             rows.append(_row(
                 PREMIUM, B_OPTIONS, check, _levels_text(_by_distance(pts, ltp), 2),
                 f"{icon} {word} {_rupees(nearest)}",

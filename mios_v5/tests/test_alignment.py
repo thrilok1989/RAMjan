@@ -241,7 +241,7 @@ def test_the_bearish_fixture_reads_bearish_with_its_conflicts_named():
     # The dealer magnet pulls up against a bearish tape — exactly the conflict
     # the summary block exists to surface.
     assert any("Charm Pin" in c for c in s["conflicts"])
-    assert s["groups"]["GLOBAL"] == BB.BEAR
+    assert s["groups"]["STRUCTURE"] == BB.BEAR
     assert s["groups"]["OPTIONS"] == BB.BEAR
 
 
@@ -735,3 +735,55 @@ def test_a_call_leg_above_its_high_pivot_is_bullish_for_nifty():
     # CALL premium above its high pivot = broken resistance on the call =
     # call strengthening = NIFTY bullish
     assert _by_check(A.build(ss), "CALL HVP HIGH")["align"] == BB.BULL
+
+
+# ── 10 · no general context ─────────────────────────────────────────────────
+#
+# News, FII/DII, sector rotation, global indices and the commodity regime were
+# on this table and are gone — from the rows AND from the tally. Every row is
+# one equal vote, so five slow once-a-day context reads could outvote the level
+# interactions the table exists to show: a summary read BEARISH on FII/DII and
+# commodities while STRUCTURE, the levels themselves, read BULLISH.
+
+def test_the_table_carries_only_levels_and_what_price_does_at_them():
+    sections = {r["group"] for r in A.build(_ss())["rows"]}
+    assert sections == {A.STRUCTURE, A.PREMIUM, A.FINAL}
+    assert "GENERAL CONTEXT" not in sections
+
+
+@pytest.mark.parametrize("gone", ["News", "FII / DII", "Sector", "Global",
+                                  "Commodity", "Regime"])
+def test_a_context_check_no_longer_appears(gone):
+    assert gone not in {r["check"] for r in A.build(_ss())["rows"]}
+
+
+def test_context_cannot_reach_the_tally():
+    """The point of the removal. A session rich in context and empty of levels
+    must produce no vote at all — previously it produced a confident one."""
+    read = A.build({
+        "_market_picture": {
+            "regime": "DOWN",
+            "news_bias": {"label": "BEARISH", "net": -3, "n": 11},
+            "sector_bias": {"rotation": "RISK-OFF", "breadth": 38},
+            "global_bias": {"label": "BEARISH", "score": -1.4},
+            "commodity_bias": {"regime": "RISK-OFF"}},
+        "_fii_dii_cash": {"FII": {"net": -7986.0}, "DII": {"net": 4589.0}}})
+    s = read["summary"]
+    assert (s["bull"], s["bear"]) == (0, 0)
+    assert s["active"] == 0
+
+
+def test_the_buckets_that_only_context_fed_are_gone():
+    """A bucket with no possible producer renders as a permanent 'not
+    reporting' chip — it says nothing and reads like a fault."""
+    assert A.BUCKETS == (A.B_STRUCTURE, A.B_OPTIONS, A.B_DEALERS)
+    groups = A.build(_ss())["summary"]["groups"]
+    assert "FLOW" not in groups and "GLOBAL" not in groups
+    assert set(groups) == set(A.BUCKETS)
+
+
+def test_no_row_claims_a_bucket_that_does_not_exist():
+    """Guards the reverse mistake: a row bucketed FLOW would vanish from every
+    per-group verdict while still counting in the totals."""
+    for r in A.build(_ss())["rows"]:
+        assert r["bucket"] in A.BUCKETS, f"{r['check']} → {r['bucket']}"

@@ -3,11 +3,24 @@
 > **Where is spot now, which levels and forces are active, and does each one
 > point BULL or BEAR?**
 
-The app answers that in twenty places. Regime lives in the Market Picture, the
-walls in the option chain, dealer posture in the Greeks panel, premium in the
-energy card, leg structure in the cockpit — each correct, each in its own box,
-and nobody can see at a glance what agrees with what. This module puts every one
-of those reads on one line each, in a single table, and counts the vote.
+The app answers that in twenty places. The walls live in the option chain,
+dealer posture in the Greeks panel, premium in the energy card, leg structure in
+the cockpit — each correct, each in its own box, and nobody can see at a glance
+what agrees with what. This module puts every one of those reads on one line
+each, in a single table, and counts the vote.
+
+## What it deliberately does NOT carry
+
+**No general context.** News, FII/DII, sector rotation, global indices and the
+commodity regime were on this table and are gone, along with the FLOW and GLOBAL
+buckets that existed only for them.
+
+They were removed because of what they did to the tally rather than what they
+are worth: every row is one equal vote, so five slow, once-a-day context reads
+outvoted the level interactions the table exists to show — a summary could read
+BEARISH on FII/DII and commodities while STRUCTURE, the levels themselves, read
+BULLISH. Those panels still exist and are still right; this table is now only
+about where price is and what it is doing at the levels in front of it.
 
 ## It is not an engine, and this is the rule that keeps it honest
 
@@ -79,20 +92,22 @@ NA = "na"
 INFO = "info"
 
 #: display sections, in table order.
-GENERAL = "GENERAL CONTEXT"
 STRUCTURE = "NIFTY STRUCTURE"
 PREMIUM = "OPTION PREMIUM / LTP"
 FINAL = "FINAL INTERACTION"
 
-#: summary buckets — the five verdicts under the table. A row's bucket is
-#: independent of the section it is DISPLAYED in: regime is shown under general
-#: context but votes with structure, because that is what it describes.
+#: summary buckets — the verdicts under the table. A row's bucket is independent
+#: of the section it is DISPLAYED in: the war zone is shown under FINAL
+#: INTERACTION and votes with structure, because that is what it describes.
+#:
+#: There is no FLOW or GLOBAL bucket. They existed only for the general-context
+#: rows — News, FII/DII, Sector, Global, Commodity — and a bucket with no
+#: possible producer would render as a permanent "not reporting" chip, which
+#: says nothing and looks like a fault.
 B_STRUCTURE = "STRUCTURE"
 B_OPTIONS = "OPTIONS"
-B_FLOW = "FLOW"
 B_DEALERS = "DEALERS"
-B_GLOBAL = "GLOBAL"
-BUCKETS = (B_STRUCTURE, B_OPTIONS, B_FLOW, B_DEALERS, B_GLOBAL)
+BUCKETS = (B_STRUCTURE, B_OPTIONS, B_DEALERS)
 
 #: alignment → the ball shown in the table. `bias_ball` owns the first three;
 #: ❓ is this module's, because "not reported" is not a bias.
@@ -363,85 +378,6 @@ def _level_row(group: str, bucket: str, check: str, level: Optional[float],
 
 
 # ── the sections ─────────────────────────────────────────────────────────────
-
-def _general(ss: Mapping[str, Any], mp: Mapping[str, Any]) -> List[Dict[str, Any]]:
-    """News · FII/DII · Sector · Global · Regime — the environment the trade
-    happens in. Every value is read off the Market Picture's own published
-    bias objects, which is where those panels already deposited them."""
-    rows: List[Dict[str, Any]] = []
-
-    nb = mp.get("news_bias")
-    if isinstance(nb, Mapping) and nb.get("label"):
-        rows.append(_row(GENERAL, B_GLOBAL, "News", str(nb["label"]), "—",
-                         _bb.direction_bias(nb.get("label")),
-                         f"{nb.get('n', 0)} headlines · net {_f(nb.get('net')) or 0:+.0f}"))
-    else:
-        rows.append(_na_row(GENERAL, B_GLOBAL, "News", "no headline read published"))
-
-    cash = _map(ss.get("_fii_dii_cash"))
-    if cash:
-        fii = _f(_map(cash.get("FII")).get("net"))
-        dii = _f(_map(cash.get("DII")).get("net"))
-        if fii is not None or dii is not None:
-            # The institutional vote is FII's; DII is shown because it is the
-            # other half of the same print, but it is reported, not scored —
-            # netting the two here would be a new formula, and no panel in the
-            # app nets them.
-            rows.append(_row(
-                GENERAL, B_FLOW, "FII / DII",
-                f"FII {fii:+,.0f}cr · DII {dii:+,.0f}cr" if fii is not None and dii is not None
-                else (f"FII {fii:+,.0f}cr" if fii is not None else f"DII {dii:+,.0f}cr"),
-                "—",
-                BULL if (fii or 0) > 0 else BEAR if (fii or 0) < 0 else NEUTRAL,
-                "FII cash net (EOD) — DII shown, not scored"))
-        else:
-            rows.append(_na_row(GENERAL, B_FLOW, "FII / DII", "no net values in the feed"))
-    else:
-        rows.append(_na_row(GENERAL, B_FLOW, "FII / DII", "cash feed not published"))
-
-    sb = mp.get("sector_bias")
-    if isinstance(sb, Mapping) and sb.get("rotation"):
-        rot = str(sb["rotation"])
-        up = "RISK-ON" in rot.upper()
-        dn = "RISK-OFF" in rot.upper()
-        rows.append(_row(GENERAL, B_GLOBAL, "Sector", rot, "—",
-                         BULL if up else BEAR if dn else NEUTRAL,
-                         f"breadth {sb.get('breadth')}% advancing"))
-    else:
-        rows.append(_na_row(GENERAL, B_GLOBAL, "Sector", "rotation snapshot too thin"))
-
-    gb = mp.get("global_bias")
-    if isinstance(gb, Mapping) and gb.get("label"):
-        rows.append(_row(GENERAL, B_GLOBAL, "Global", str(gb["label"]), "—",
-                         _bb.direction_bias(gb.get("label")),
-                         f"score {_f(gb.get('score')) or 0:+.1f} across global indices"))
-    else:
-        rows.append(_na_row(GENERAL, B_GLOBAL, "Global", "global indices not published"))
-
-    cb = mp.get("commodity_bias")
-    if isinstance(cb, Mapping) and cb.get("regime"):
-        reg = str(cb["regime"])
-        rows.append(_row(GENERAL, B_GLOBAL, "Commodity", reg, "—",
-                         BULL if "ON" in reg.upper() and "OFF" not in reg.upper()
-                         else BEAR if "OFF" in reg.upper() else NEUTRAL,
-                         "risk appetite from the commodity complex"))
-    else:
-        rows.append(_na_row(GENERAL, B_GLOBAL, "Commodity", "commodity read not published"))
-
-    reg = mp.get("regime")
-    if reg:
-        # The regime is the Market Picture's own confidence-weighted verdict —
-        # this row transports it and its probabilities, and votes with structure
-        # because that is what a regime describes.
-        rows.append(_row(GENERAL, B_STRUCTURE, "Regime", str(reg),
-                         f"{mp.get('em', '')} {reg}".strip(),
-                         BULL if reg == "UP" else BEAR if reg == "DOWN" else NEUTRAL,
-                         f"↑{mp.get('p_up', '—')}% ↓{mp.get('p_down', '—')}% "
-                         f"↔{mp.get('p_side', '—')}%"))
-    else:
-        rows.append(_na_row(GENERAL, B_STRUCTURE, "Regime", "Market Picture has no read yet"))
-    return rows
-
 
 def _structure(ss: Mapping[str, Any], mp: Mapping[str, Any], spot: Optional[float],
                zones: Sequence[Mapping[str, Any]],
@@ -1042,7 +978,6 @@ def build(ss: Mapping[str, Any]) -> Dict[str, Any]:
     fr = _map(fr)
 
     rows: List[Dict[str, Any]] = []
-    rows += _general(ss, mp)
     rows += _structure(ss, mp, spot, zones, fr)
     rows += _premium(ss, zones)
     rows += _final(fr, mp, spot, zones)

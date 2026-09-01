@@ -368,41 +368,60 @@ def _na_row(group: str, bucket: str, check: str, why: str) -> Dict[str, Any]:
 def _level_row(group: str, bucket: str, check: str, level: Optional[float],
                spot: Optional[float], zones: Sequence[Mapping[str, Any]],
                chart: str, role: str, remark: str = "",
-               missing: str = "not published this cycle",
-               structural: bool = False) -> Dict[str, Any]:
-    """One S/R-shaped row: a price, what spot is doing at it, what that means.
-
-    `structural` drops the far-gate for levels whose meaning is POSITIONAL
-    rather than interactional — the OI walls. A wall is where the writers are:
-    a PE wall below spot is a floor beneath the market and a CE wall above is a
-    cap over it, and that is as true eighty points away as it is at six. Gating
-    it on proximity reported ⚪ for a wall that was plainly doing its job.
-
-    Every other level keeps the gate, because an untested S/R line price is
-    nowhere near genuinely is not saying anything about direction yet.
-    """
+               missing: str = "not published this cycle") -> Dict[str, Any]:
+    """One S/R-shaped row: a price, what spot is doing at it, what that means."""
     if level is None:
         return _na_row(group, bucket, check, missing)
     text, holding, observed = _interaction(level, spot, zones, role)
-    if structural and holding is None and level is not None and spot is not None:
-        # Only the FAR case is recovered. Price sitting on the wall is a live
-        # contest and stays undecided — that is the one distance at which a
-        # wall genuinely has not said which way it goes.
-        if abs(spot - level) > AT_BAND:
-            above = spot > level
-            holding = _holding(role, (ABOVE, above))
-            # ⚠️ Re-word as well as re-score. "⚪ Far from ₹24,300" beside a
-            # 🟢 Bull is a contradiction on one line — the neutral glyph says
-            # the row abstained and the alignment says it did not. Say what the
-            # wall IS from here instead, which is the thing that votes.
-            d = spot - level
-            noun = ("floor" if _is_support(role) else "cap") if holding \
-                else ("floor lost" if _is_support(role) else "cap cleared")
-            icon = BALLS.get(_level_align(chart, role, holding), "⚪")
-            text = (f"{icon} {noun.capitalize()} {_rupees(level)} "
-                    f"({'above' if d < 0 else 'below'} spot, {abs(d):,.0f} pts)")
     return _row(group, bucket, check, _rupees(level), text,
                 _level_align(chart, role, holding), remark, observed)
+
+
+def _wall_row(check: str, level: Optional[float], spot: Optional[float],
+              is_call: bool, missing: str) -> Dict[str, Any]:
+    """An OI wall, read as ROOM rather than as a level price is interacting with.
+
+    ⚠️ This is deliberately not the S/R rule, and the difference is the point.
+
+    Every other row asks "did this level hold or break". A wall asks something
+    else: **how much room is there before the writers are in the way.** The
+    strike itself barely moves — it is where the open interest sat down — so
+    what changes through the day is the distance to it, and that distance is
+    the read:
+
+        CALL wall (the cap)     close overhead → 🔴 capped, no room to run
+                                far away       → 🟢 headroom
+        PUT wall (the floor)    close below    → 🟢 supported, writers defending
+                                far away       → 🔴 air beneath, nothing to catch a fall
+
+    Note both directions invert against the naive reading, which is why this
+    needed saying out loud: a cap far away is BULLISH (there is space), and a
+    floor far away is BEARISH (there is nothing under the market). Scoring a
+    wall by which side of it price sits — the previous rule — gets the near
+    cases exactly backwards.
+
+    `AT` and `NEAR` collapse to one answer here on purpose. Price sitting on a
+    cap and price twenty points under it are the same trading fact — the cap is
+    in the way — and splitting them would only produce a neutral row at the one
+    distance the wall matters most.
+    """
+    if level is None or spot is None:
+        return _na_row(STRUCTURE, B_STRUCTURE, check, missing)
+    gap = abs(spot - level)
+    active = gap <= NEAR_BAND          # at OR near — the wall is in play
+    align = (BEAR if active else BULL) if is_call else (BULL if active else BEAR)
+    if is_call:
+        word = ("Cap in the way" if active else "Cap clear")
+        why = ("CE writers overhead — little room to run"
+               if active else "no CE wall nearby — headroom above")
+    else:
+        word = ("Floor underfoot" if active else "Floor distant")
+        why = ("PE writers defending just below — supported"
+               if active else "no PE wall nearby — air beneath the market")
+    side = "above" if level > spot else "below"
+    return _row(STRUCTURE, B_STRUCTURE, check, _rupees(level),
+                f"{BALLS[align]} {word} {_rupees(level)} "
+                f"({gap:,.0f} pts {side})", align, why)
 
 
 # ── the sections ─────────────────────────────────────────────────────────────
@@ -421,17 +440,13 @@ def _structure(ss: Mapping[str, Any], mp: Mapping[str, Any], spot: Optional[floa
                 if spot is not None else
                 _na_row(STRUCTURE, B_STRUCTURE, "Spot Price", "no live spot"))
 
-    # OI walls. `writing_bias` owns the direction — PUT writing builds a floor
-    # (bullish), CE writing caps (bearish) — so the wall rows read it through
-    # the level rule for consistency with every other level row.
-    rows.append(_level_row(STRUCTURE, B_STRUCTURE, "PUT Wall OI",
-                           _f(_first(mp.get("oi_floor"))), spot, zones,
-                           "NIFTY", "support", "PE writers' floor",
-                           "no PE wall ranked", structural=True))
-    rows.append(_level_row(STRUCTURE, B_STRUCTURE, "CALL Wall OI",
-                           _f(_first(mp.get("oi_ceiling"))), spot, zones,
-                           "NIFTY", "resistance", "CE writers' cap",
-                           "no CE wall ranked", structural=True))
+    # OI walls — their own rule. See `_wall_row`: a wall is read as ROOM
+    # (is the cap in the way? is there a floor underfoot?), not as a level
+    # price is holding or breaking, so it does not go through `_level_row`.
+    rows.append(_wall_row("PUT Wall OI", _f(_first(mp.get("oi_floor"))), spot,
+                          is_call=False, missing="no PE wall ranked"))
+    rows.append(_wall_row("CALL Wall OI", _f(_first(mp.get("oi_ceiling"))), spot,
+                          is_call=True, missing="no CE wall ranked"))
 
     # Canonical S/R — the one support and one resistance every screen shares.
     rsr = _map(ss.get("_reaction_sr"))

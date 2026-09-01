@@ -829,52 +829,89 @@ def test_the_gate_still_excludes_what_it_was_built_for():
     assert "not in play" in row["remark"]
 
 
-# ── 12 · an OI wall is positional, so distance does not silence it ──────────
+# ── 12 · an OI wall is ROOM, not a level price is holding or breaking ───────
 #
-# A wall is where the writers are: a PE wall below spot is a floor beneath the
-# market and a CE wall above is a cap over it, and that is as true eighty points
-# away as at six. Gating it on proximity reported ⚪ for a wall plainly doing its
-# job.
+# Every other row asks "did this level hold or break". A wall asks how much
+# room there is before the writers are in the way — the strike barely moves, so
+# what changes through the day is the distance to it, and that distance is the
+# read. Both directions invert against the naive reading, which is exactly why
+# the position-based rule got the near cases backwards.
 
-@pytest.mark.parametrize("check,wall,spot,expected", [
-    # the natural cases — the wall is doing its job from a distance
-    ("PUT Wall OI", 24300, 24380, BB.BULL),      # floor beneath
-    ("CALL Wall OI", 24400, 24320, BB.BEAR),     # cap above
-    # and the broken ones — position still decides, distance still does not
-    ("PUT Wall OI", 24400, 24320, BB.BEAR),      # price fell through the floor
-    ("CALL Wall OI", 24300, 24380, BB.BULL),     # price cleared the cap
+@pytest.mark.parametrize("check,wall,spot,expected,why", [
+    # the CAP: close overhead is the thing stopping the move …
+    ("CALL Wall OI", 24400, 24400, BB.BEAR, "sitting on the cap"),
+    ("CALL Wall OI", 24400, 24380, BB.BEAR, "20 pts under the cap"),
+    ("CALL Wall OI", 24400, 24420, BB.BEAR, "20 pts over, still in its shadow"),
+    # … and far away is headroom
+    ("CALL Wall OI", 24400, 24200, BB.BULL, "200 pts of room to run"),
+    # the FLOOR: close underfoot is writers defending …
+    ("PUT Wall OI", 24300, 24300, BB.BULL, "sitting on the floor"),
+    ("PUT Wall OI", 24300, 24320, BB.BULL, "20 pts above the floor"),
+    ("PUT Wall OI", 24300, 24280, BB.BULL, "20 pts under, still supported"),
+    # … and far away is air beneath the market
+    ("PUT Wall OI", 24300, 24500, BB.BEAR, "200 pts of nothing below"),
 ])
-def test_a_far_oi_wall_still_reports_its_bias(check, wall, spot, expected):
+def test_a_wall_is_scored_by_how_much_room_it_leaves(check, wall, spot,
+                                                     expected, why):
     is_pe = check.startswith("PUT")
     ss = {"_nifty_spot_live": float(spot),
           "_market_picture": {"regime": "SIDEWAYS",
                               "oi_floor": (wall, 9e4) if is_pe else None,
                               "oi_ceiling": (wall, 9e4) if not is_pe else None}}
-    assert _by_check(A.build(ss), check)["align"] == expected
+    assert _by_check(A.build(ss), check)["align"] == expected, why
 
 
-def test_a_wall_price_is_sitting_on_is_still_undecided():
-    """The one distance at which a wall genuinely has not said which way it
-    goes. Recovering THAT would be inventing a read."""
-    ss = {"_nifty_spot_live": 24382.0,
-          "_market_picture": {"regime": "SIDEWAYS", "oi_floor": (24380, 9e4)}}
-    assert _by_check(A.build(ss), "PUT Wall OI")["align"] == BB.NEUTRAL
+def test_at_and_near_a_wall_are_the_same_answer():
+    """Price sitting on a cap and price twenty points under it are the same
+    trading fact — the cap is in the way. Splitting them would produce a
+    neutral row at the one distance the wall matters most."""
+    def _wall(spot):
+        ss = {"_nifty_spot_live": float(spot),
+              "_market_picture": {"regime": "SIDEWAYS",
+                                  "oi_ceiling": (24400, 9e4)}}
+        return _by_check(A.build(ss), "CALL Wall OI")["align"]
+    assert _wall(24400) == _wall(24380) == _wall(24399) == BB.BEAR
 
 
-def test_a_voting_wall_never_reads_as_far_from():
-    """"⚪ Far from ₹24,300" beside "🟢 Bull" is a contradiction on one line —
-    the glyph says the row abstained and the alignment says it did not."""
-    ss = {"_nifty_spot_live": 24380.0,
-          "_market_picture": {"regime": "SIDEWAYS", "oi_floor": (24300, 9e4)}}
-    row = _by_check(A.build(ss), "PUT Wall OI")
-    assert row["align"] == BB.BULL
-    assert "Far from" not in row["position"]
-    assert "Floor" in row["position"] and "below spot" in row["position"]
+def test_a_wall_never_abstains():
+    """A wall always has a reading — it is either in the way or it is not.
+    There is no distance at which it says nothing."""
+    for spot in (24000, 24395, 24400, 24405, 25000):
+        ss = {"_nifty_spot_live": float(spot),
+              "_market_picture": {"regime": "SIDEWAYS",
+                                  "oi_ceiling": (24400, 9e4)}}
+        row = _by_check(A.build(ss), "CALL Wall OI")
+        assert row["align"] in (BB.BULL, BB.BEAR), spot
 
 
-def test_only_the_walls_are_structural():
+def test_the_wall_wording_matches_its_score():
+    """"Far from ₹24,400" beside 🟢 Bull was a contradiction on one line. The
+    text now names what the wall IS from here, which is the thing that votes."""
+    def _pos(spot, key, wall):
+        ss = {"_nifty_spot_live": float(spot),
+              "_market_picture": {"regime": "SIDEWAYS", key: (wall, 9e4)}}
+        check = "CALL Wall OI" if key == "oi_ceiling" else "PUT Wall OI"
+        return _by_check(A.build(ss), check)["position"]
+    assert "Cap in the way" in _pos(24380, "oi_ceiling", 24400)
+    assert "Cap clear" in _pos(24200, "oi_ceiling", 24400)
+    assert "Floor underfoot" in _pos(24320, "oi_floor", 24300)
+    assert "Floor distant" in _pos(24500, "oi_floor", 24300)
+    assert "Far from" not in _pos(24200, "oi_ceiling", 24400)
+
+
+def test_a_wall_does_not_go_through_the_hold_or_break_rule():
+    """Guards the confusion this replaced: the walls have their own builder, so
+    a future change to the S/R rule cannot silently re-score them."""
+    src = pathlib.Path(A.__file__).read_text()
+    assert "def _wall_row(" in src
+    assert "_wall_row(\"PUT Wall OI\"" in src
+    assert "_wall_row(\"CALL Wall OI\"" in src
+
+
+def test_only_the_walls_escape_the_far_gate():
     """S/R, POC, HVP and the gamma flip keep the far-gate: an untested line
-    price is nowhere near is not saying anything about direction yet."""
+    price is nowhere near is not saying anything about direction yet. Only the
+    walls, which are read as room rather than as levels, always report."""
     ss = {"_nifty_spot_live": 24380.0, "_market_picture": {"regime": "SIDEWAYS"},
           "_reaction_sr": {"support": {"price": 24000.0},
                            "resistance": {"price": 24800.0}},

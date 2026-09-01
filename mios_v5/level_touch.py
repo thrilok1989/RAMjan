@@ -6,16 +6,13 @@ message. `vob_minimal` owns the memory (the armed/level state per level, which
 survives between refreshes), gathers the levels from the reads that own them,
 and sends.
 
-Not spamming has two guards. The app reruns every ~20 seconds and price can sit
-inside the ±band for many of them, so `evaluate` **latches**: it alerts once on
-entry, disarms, and only re-arms after price has moved clear of the level by
-`REARM` (wider than `BAND`, so a wobble at the boundary does not re-trigger).
-The latch stops a continuous loiter from repeating — but price that keeps
-leaving and re-entering the level (chopping across it) would clear the re-arm
-each time and alert on every return. So a second guard, a **per-level cooldown**
-(`COOLDOWN_S`), suppresses another alert for the same level within that window
-however many times price re-enters. When the level itself moves (a new war-zone
-price, a new OI wall) both guards reset, so the new level's first touch alerts.
+The one subtlety is not spamming. The app reruns every ~20 seconds and price can
+sit inside the ±band for many of them — so a naive "distance ≤ band → alert"
+would fire every cycle while price loiters. `evaluate` latches instead: it
+alerts once on entry, disarms, and only re-arms after price has moved clear of
+the level by `REARM` (wider than `BAND`, so a wobble at the boundary does not
+re-trigger). When the level itself moves (a new war-zone price, a new OI wall)
+it re-arms immediately, so the new level's first touch always alerts.
 """
 
 from __future__ import annotations
@@ -33,11 +30,6 @@ REARM = 10.0
 #: points, so anything under a point is the same level).
 LEVEL_EPS = 0.5
 
-#: minimum seconds between two alerts for the SAME level, even across separate
-#: re-entries — the "sleep time" for a level price keeps chopping across. 15 min
-#: matches the app's other repeat-alert throttle.
-COOLDOWN_S = 900.0
-
 
 def _f(v: Any) -> Optional[float]:
     try:
@@ -49,24 +41,22 @@ def _f(v: Any) -> Optional[float]:
 
 def evaluate(level: Any, spot: Any, state: Optional[Mapping[str, Any]],
              band: float = BAND, rearm: float = REARM,
-             cooldown_s: float = COOLDOWN_S, now: Optional[float] = None
+             cooldown_s: Optional[float] = None, now: Optional[float] = None
              ) -> Tuple[bool, Dict[str, Any]]:
     """Should this reading of ONE level fire, and what state carries forward?
 
-    `state` is the previous `{'level', 'armed', 'alerted_at'}` for this level key
-    (or None / {} the first time). Returns `(alert, new_state)`:
+    `state` is the previous `{'level', 'armed', 'last_alert_time'}` for this level
+    key (or None / {} the first time). Returns `(alert, new_state)`:
 
-    * price within `band` of the level AND armed AND the cooldown has elapsed
-      since the last alert for this level → alert once, then disarm and stamp
-      the time;
+    * price within `band` of the level AND armed → alert once, then disarm;
     * price at least `rearm` from the level → re-arm (ready for the next touch);
-    * a level that differs from the remembered one re-arms immediately AND clears
-      the cooldown stamp, so the new level's first touch is never swallowed.
+    * a level that differs from the remembered one re-arms immediately, so the
+      new level's first touch is never swallowed by the old one's latch;
+    * if `cooldown_s` is set and now < last_alert_time + cooldown_s, suppress
+      alerts even if armed (sleeping facility).
 
-    `now` is epoch seconds; when it (or `cooldown_s`) is not supplied the
-    cooldown is skipped and only the latch applies. Returns `(False, state)`
-    unchanged when either number is unreadable — a missing level or spot is not
-    a touch.
+    Returns `(False, state)` unchanged when either number is unreadable — a
+    missing level or spot is not a touch.
     """
     lv = _f(level)
     sp = _f(spot)
@@ -77,31 +67,27 @@ def evaluate(level: Any, spot: Any, state: Optional[Mapping[str, Any]],
     prev_lv = _f(prev.get("level"))
     same_level = prev_lv is not None and abs(prev_lv - lv) <= LEVEL_EPS
     armed = bool(prev.get("armed", True)) if same_level else True
-    # the last-alert stamp only carries forward for the SAME level — a moved
-    # level starts its own cooldown.
-    alerted_at = _f(prev.get("alerted_at")) if same_level else None
+    last_alert_time = prev.get("last_alert_time")
 
     dist = abs(sp - lv)
     alert = False
-    if dist <= band and armed:
-        cooling = (now is not None and alerted_at is not None
-                   and (now - alerted_at) < cooldown_s)
-        if cooling:
-            # inside the sleep window: disarm so it stops checking every cycle,
-            # but do NOT alert. It re-arms normally once price leaves by `rearm`.
-            armed = False
-        else:
-            alert = True
-            armed = False        # latch: no re-alert while price loiters here
-            if now is not None:
-                alerted_at = float(now)
+
+    # Check if in cooldown (sleeping facility)
+    in_cooldown = False
+    if cooldown_s is not None and now is not None and last_alert_time is not None:
+        in_cooldown = (now - last_alert_time) < cooldown_s
+
+    if dist <= band and armed and not in_cooldown:
+        alert = True
+        armed = False            # latch: no re-alert while price loiters here
+        last_alert_time = now if now is not None else last_alert_time
     elif dist >= rearm:
         armed = True             # price has left — ready for the next touch
 
-    out: Dict[str, Any] = {"level": lv, "armed": armed}
-    if alerted_at is not None:
-        out["alerted_at"] = alerted_at
-    return alert, out
+    new_state = {"level": lv, "armed": armed}
+    if last_alert_time is not None:
+        new_state["last_alert_time"] = last_alert_time
+    return alert, new_state
 
 
 def message(label: str, price: float, spot: float, icon: str = "🎯",

@@ -38,10 +38,17 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from .poc_series import _f, _seq
 
-#: Bars either side of a candidate for it to count as a pivot. 15 one-minute bars
-#: is a quarter-hour of not being exceeded, which is the reference's own setting.
-LEFT = 15
-RIGHT = 15
+#: Bars either side of a candidate for it to count as a pivot. Five one-minute
+#: bars, set by the desk: a pivot confirms five minutes after it prints rather
+#: than a quarter of an hour, which is what makes it usable intraday. The
+#: reference implementation used 15 on both sides; that is a slower chart's
+#: setting and it surfaced too few pivots, too late, to trade from.
+#:
+#: `RIGHT` is the one that costs latency — a pivot cannot be confirmed until
+#: that many bars have printed after it — so it is the number to revisit if
+#: pivots start reading as noise.
+LEFT = 5
+RIGHT = 5
 
 #: A pivot's volume must exceed this on the normalised scale to be kept. The scale
 #: is `rolling sum ÷ high percentile × 5`, so 2.0 means "clearly above the session's

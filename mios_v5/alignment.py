@@ -426,10 +426,19 @@ def _resolve(chart: str, role: str,
 
 
 def _row(group: str, bucket: str, check: str, value: str, position: str,
-         align: str, remark: str = "", observed: bool = True) -> Dict[str, Any]:
+         align: str, remark: str = "", observed: bool = True,
+         level: Optional[float] = None) -> Dict[str, Any]:
+    """One line of the checklist.
+
+    `level` is the row's price as a NUMBER, and only index-axis rows carry it:
+    the ladder is built by sorting rows on it, so one source feeds both the
+    table and the map. A leg row leaves it None — a premium of ₹5.75 sorted
+    into a ladder of index levels would place the call between the gamma flip
+    and nothing at all.
+    """
     return {"group": group, "bucket": bucket, "check": check, "value": value,
             "position": position, "align": align, "remark": remark,
-            "observed": bool(observed)}
+            "observed": bool(observed), "level": _f(level)}
 
 
 def _na_row(group: str, bucket: str, check: str, why: str) -> Dict[str, Any]:
@@ -457,7 +466,7 @@ def _level_row(group: str, bucket: str, check: str, level: Optional[float],
     if barrier and verdict[0] == FAR:
         text = f"{BALLS.get(align, '⚪')} {_room_text(level, spot, role)}"
     return _row(group, bucket, check, _rupees(level), text, align, remark,
-                observed)
+                observed, level=level if chart == "NIFTY" else None)
 
 
 def _wall_row(check: str, level: Optional[float], spot: Optional[float],
@@ -504,7 +513,7 @@ def _wall_row(check: str, level: Optional[float], spot: Optional[float],
     side = "above" if level > spot else "below"
     return _row(STRUCTURE, B_STRUCTURE, check, _rupees(level),
                 f"{BALLS[align]} {word} {_rupees(level)} "
-                f"({gap:,.0f} pts {side})", align, why)
+                f"({gap:,.0f} pts {side})", align, why, level=level)
 
 
 # ── the sections ─────────────────────────────────────────────────────────────
@@ -519,7 +528,8 @@ def _structure(ss: Mapping[str, Any], mp: Mapping[str, Any], spot: Optional[floa
     rows.append(_row(STRUCTURE, B_STRUCTURE, "Spot Price",
                      _rupees(spot) if spot is not None else "—",
                      "AT" if spot is not None else "—", INFO,
-                     "live index — the reference every other row measures against")
+                     "live index — the reference every other row measures against",
+                     level=spot)
                 if spot is not None else
                 _na_row(STRUCTURE, B_STRUCTURE, "Spot Price", "no live spot"))
 
@@ -590,7 +600,8 @@ def _structure(ss: Mapping[str, Any], mp: Mapping[str, Any], spot: Optional[floa
             text = f"{BALLS.get(_al, '⚪')} {_room_text(nearest, spot, role)}"
         rows.append(_row(STRUCTURE, B_STRUCTURE, check, _levels_text(_by_distance(pts, spot)),
                          text, _al,
-                         f"{len(pts)} pivot line(s) · nearest {_rupees(nearest)}", observed))
+                         f"{len(pts)} pivot line(s) · nearest {_rupees(nearest)}",
+                         observed, level=nearest))
 
     # ── dealer posture ──
     gx = _map(ss.get("_gex_data"))
@@ -686,14 +697,14 @@ def _magnet_row(mp: Mapping[str, Any], ss: Mapping[str, Any],
     if abs(dist) <= AT_BAND:
         return _row(STRUCTURE, B_DEALERS, "Charm Pin / Magnet", _rupees(pin),
                     f"🧲 At {_rupees(pin)}", NEUTRAL,
-                    "price pinned — no directional edge here")
+                    "price pinned — no directional edge here", level=pin)
     # A magnet is a pull, not a trend: it is directional while price is away
     # from it, and stops meaning anything once price arrives.
     return _row(STRUCTURE, B_DEALERS, "Charm Pin / Magnet", _rupees(pin),
                 f"🧲 Pull {'↑' if dist > 0 else '↓'} toward {_rupees(pin)} ({dist:+,.0f})",
                 BULL if dist > 0 else BEAR,
                 str(read.get("drift") or "dealer hedging drag")
-                + (" · expiry" if read.get("expiry") else ""))
+                + (" · expiry" if read.get("expiry") else ""), level=pin)
 
 
 def _leg_bands(ltp: float) -> Tuple[float, float]:
@@ -765,6 +776,31 @@ def _prefer_align(preferred: Optional[str], ce_e: Optional[float],
         return NEUTRAL
     ce, pe = (ce_e or 0.0), (pe_e or 0.0)
     return BULL if ce > pe else BEAR if pe > ce else NEUTRAL
+
+
+def _energy_read(ss: Mapping[str, Any]) -> Dict[str, Any]:
+    """CALL / PUT energy as numbers, for the bar pair.
+
+    The Premium Energy row already words this; the dashboard wants to draw it,
+    and re-deriving it there would be the same lookup twice with two chances to
+    drift. Same source, same fallback (`bridge` then `sides`) as the row.
+    """
+    pe = _map(ss.get("_premium_energy"))
+    bridge = _map(pe.get("bridge"))
+    score = _map(bridge.get("energy_score")) or _map(pe.get("energy_score"))
+    ce, put = _f(score.get("CALL")), _f(score.get("PUT"))
+    if ce is None and put is None:
+        sides = _map(pe.get("sides"))
+        ce = _f(_map(sides.get("CALL")).get("energy"))
+        put = _f(_map(sides.get("PUT")).get("energy"))
+    if ce is None and put is None:
+        return {}
+    preferred = (bridge.get("preferred_premium")
+                 or _map(pe.get("preferred")).get("preferred"))
+    return {"CALL": ce, "PUT": put,
+            "preferred": str(preferred) if preferred else None,
+            "winner": ("CALL" if (ce or 0) > (put or 0) else
+                       "PUT" if (put or 0) > (ce or 0) else None)}
 
 
 def _premium(ss: Mapping[str, Any], zones: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
@@ -1040,7 +1076,7 @@ def _final(fr: Mapping[str, Any], mp: Mapping[str, Any], spot: Optional[float],
         bits.append(" · ".join(f"{k} {v}%" for k, v in probs.items()))
     return [_row(FINAL, B_STRUCTURE, "War Zone",
                  _rupees(price) if price is not None else "—", text, align,
-                 " · ".join(bits), observed)]
+                 " · ".join(bits), observed, level=price)]
 
 
 # ── the summary ──────────────────────────────────────────────────────────────
@@ -1120,6 +1156,183 @@ def summarise(rows: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
     }
 
 
+# ── the dashboard: the same read, arranged to be seen in ten seconds ────────
+#
+# Twenty-one rows of five columns is a complete answer and a slow one. Every
+# figure below is already in `rows` — nothing here reads session state a second
+# time or scores anything again. It groups, sorts and counts what the checklist
+# already decided, so the dashboard and the table can never disagree.
+
+#: two levels within this many points are one rung on the ladder. The magnet and
+#: the PUT wall are routinely the same strike, and drawing them as two lines a
+#: pixel apart says "two things" where the market has one.
+RUNG_TOLERANCE = 12.0
+
+#: agreement below this is a lean, not an alignment. A net read carried by a
+#: third of the active checks is a different trade from one carried by all of
+#: them, and printing only "BEARISH" hides which it is.
+LOW_CONVICTION = 0.50
+HIGH_CONVICTION = 0.70
+
+CONVICTION = ("LOW", "MODERATE", "HIGH")
+
+
+def conviction(summary: Mapping[str, Any]) -> Tuple[str, int]:
+    """`(word, percent)` — how much of the active vote the net read carries.
+
+    ⚠️ This is the number the table was hiding. "🔴 BEARISH" over 7 of 21
+    checks and "🔴 BEARISH" over 19 of 21 are the same three words and
+    completely different trades. The percent is majority / active, so an
+    unavailable check neither helps nor hurts.
+    """
+    active = int(summary.get("active") or 0)
+    if not active:
+        return CONVICTION[0], 0
+    pct = round(int(summary.get("agreement") or 0) / active * 100)
+    word = (CONVICTION[2] if pct >= HIGH_CONVICTION * 100 else
+            CONVICTION[1] if pct >= LOW_CONVICTION * 100 else CONVICTION[0])
+    return word, pct
+
+
+def ladder(rows: Sequence[Mapping[str, Any]],
+           spot: Optional[float]) -> List[Dict[str, Any]]:
+    """Every index level as a price map, highest first, with spot in place.
+
+    Built from the ROWS, not from session state — one source for the table and
+    the map, so a level cannot appear on one and not the other. Only index-axis
+    rows carry a `level`; a premium sorted into this would land nonsensically
+    between two index prices.
+
+    Levels within `RUNG_TOLERANCE` collapse into one rung, because the magnet
+    and the PUT wall sitting on the same strike are one thing to trade against,
+    not two lines a pixel apart.
+    """
+    pts = [(r["level"], r) for r in rows
+           if _f(r.get("level")) is not None and r.get("check") != "Spot Price"]
+    rungs: List[Dict[str, Any]] = []
+    for price, row in sorted(pts, key=lambda t: -t[0]):
+        if rungs and abs(rungs[-1]["price"] - price) <= RUNG_TOLERANCE:
+            rungs[-1]["labels"].append(row.get("check"))
+            rungs[-1]["aligns"].append(row.get("align"))
+            continue
+        rungs.append({"price": price, "labels": [row.get("check")],
+                      "aligns": [row.get("align")], "spot": False})
+    # One rung per level, then spot slotted in at its own place — it is the
+    # reference the whole map is read against, not another level on it.
+    if spot is not None:
+        at = next((i for i, r in enumerate(rungs) if r["price"] < spot),
+                  len(rungs))
+        rungs.insert(at, {"price": spot, "labels": ["SPOT"], "aligns": [INFO],
+                          "spot": True})
+    for r in rungs:
+        # The rung's colour is its strongest claim: one direction if its rows
+        # agree, neutral if they disagree OR reported neutral, ❓ only when
+        # every row on it went quiet. Collapsing "they disagree" and "nobody
+        # reported" into one glyph loses the difference between a contested
+        # level and an absent one.
+        kinds = {a for a in r["aligns"] if a in (BULL, BEAR)}
+        if len(kinds) == 1:
+            r["align"] = kinds.pop()
+        elif kinds or NEUTRAL in r["aligns"]:
+            r["align"] = NEUTRAL
+        else:
+            r["align"] = INFO if r["spot"] else NA
+        r["distance"] = (None if spot is None or r["spot"]
+                         else round(r["price"] - spot))
+    return rungs
+
+
+def _leg_card(rows: Sequence[Mapping[str, Any]], chart: str) -> Dict[str, Any]:
+    """One leg's rows, collected — premium, energy and its own structure."""
+    want = {f"{chart} LTP Price": "premium",
+            f"{chart} LTP Support": "support",
+            f"{chart} LTP Resistance": "resistance",
+            f"{chart} HVP HIGH": "hvp_high",
+            f"{chart} HVP LOW": "hvp_low"}
+    out: Dict[str, Any] = {"chart": chart, "fields": []}
+    for r in rows:
+        key = want.get(str(r.get("check")))
+        if not key:
+            continue
+        if key == "premium":
+            out["premium"] = r.get("value")
+            out["leg"] = r.get("remark")
+        else:
+            out["fields"].append({"name": key.replace("_", " ").title(),
+                                  "value": r.get("value"),
+                                  "align": r.get("align"),
+                                  "note": r.get("position")})
+    return out
+
+
+def dashboard(read: Mapping[str, Any]) -> Dict[str, Any]:
+    """The ten-second view over a read `build()` already produced.
+
+    Takes the built read rather than session state, so there is exactly one
+    pass over the market per cycle and the dashboard is provably the same data
+    as the table beneath it.
+    """
+    rows = list(read.get("rows") or [])
+    summary = _map(read.get("summary"))
+    spot = _f(read.get("spot"))
+    by_check = {str(r.get("check")): r for r in rows}
+    word, pct = conviction(summary)
+
+    def _row_of(name: str) -> Mapping[str, Any]:
+        return _map(by_check.get(name))
+
+    # the four headline levels, from the rows that already found them
+    heads = {
+        "spot": _row_of("Spot Price").get("value"),
+        "support": _row_of("NIFTY Support").get("value"),
+        "resistance": _row_of("NIFTY Resistance").get("value"),
+        "magnet": _row_of("Charm Pin / Magnet").get("value"),
+    }
+
+    # what is pushing each way — the directional rows, named, most useful first
+    order = ("Charm Pin / Magnet", "PUT Wall OI", "CALL Wall OI",
+             "NIFTY Support", "NIFTY Resistance", "War Zone", "NIFTY POC",
+             "NIFTY HVP LOW", "NIFTY HVP HIGH", "Gamma Flip", "Dealer GEX",
+             "Dealer DEX", "Premium Energy")
+    rank = {n: i for i, n in enumerate(order)}
+    directional = sorted((r for r in rows if r.get("align") in (BULL, BEAR)),
+                         key=lambda r: rank.get(str(r.get("check")), 99))
+    # ⚠️ Each entry carries its BUCKET. Without it the three columns below can
+    # only be handed the global bull/bear list, and every bearish column shows
+    # the same three rows — the dealer magnet appearing under OPTIONS, the PUT
+    # wall under DEALERS. A column that names drivers it does not own is worse
+    # than a column that names none.
+    def _entry(r):
+        return {"check": r["check"], "bucket": r.get("bucket"),
+                "why": r.get("position") or r.get("value"),
+                "remark": r.get("remark")}
+
+    pressure = {BULL: [_entry(r) for r in directional if r["align"] == BULL],
+                BEAR: [_entry(r) for r in directional if r["align"] == BEAR]}
+
+    # CALL vs PUT energy, for the bar pair. Straight off the Premium Energy row
+    # the table already built — the numbers are Stage 71.7's.
+    energy = _map(read.get("energy"))
+
+    return {
+        "spot": spot,
+        "net": summary.get("net") or NEUTRAL,
+        "conviction": word,
+        "conviction_pct": pct,
+        "counts": {k: summary.get(k, 0)
+                   for k in ("bull", "bear", "neutral", "na", "info")},
+        "agreement": summary.get("agreement", 0),
+        "active": summary.get("active", 0),
+        "groups": summary.get("groups") or {},
+        "heads": heads,
+        "ladder": ladder(rows, spot),
+        "pressure": pressure,
+        "energy": energy,
+        "legs": [_leg_card(rows, "CALL"), _leg_card(rows, "PUT")],
+        "gate": _map(read.get("gate")),
+    }
+
+
 def build(ss: Mapping[str, Any]) -> Dict[str, Any]:
     """The whole checklist: `{'rows': [...], 'summary': {...}, 'spot': float}`.
 
@@ -1152,4 +1365,10 @@ def build(ss: Mapping[str, Any]) -> Dict[str, Any]:
     rows += _structure(ss, mp, spot, zones, fr)
     rows += _premium(ss, zones)
     rows += _final(fr, mp, spot, zones)
-    return {"rows": rows, "summary": summarise(rows), "spot": spot}
+    # ⚠️ The gate is TRANSPORTED, not recomputed. `compute_market_picture`
+    # already owns the entry decision — its state, target, invalidation and R:R
+    # — and a second verdict here would be the one thing this module exists not
+    # to be: two answers to "do I trade this", disagreeing on the same screen.
+    return {"rows": rows, "summary": summarise(rows), "spot": spot,
+            "energy": _energy_read(ss),
+            "gate": _map(mp.get("entry_gate"))}

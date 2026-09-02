@@ -97,6 +97,60 @@ _CSS = f"""<style>
 .{_NS} .conflict {{ font-size:13px; color:{WARN}; }}
 .{_NS} .conflict .note {{ color:{FAINT}; font-size:11.5px; margin-top:3px; }}
 
+/* ── the dashboard ───────────────────────────────────────────────── */
+.{_NS} .verdict {{ text-align:center; padding:6px 0 10px; }}
+.{_NS} .verdict .big {{ font-size:30px; font-weight:800; line-height:1.15; }}
+.{_NS} .verdict .conv {{ font-size:13px; font-weight:700; margin-top:2px; }}
+.{_NS} .verdict .spot {{ font-size:15px; color:{BRIGHT}; margin-bottom:4px; }}
+
+/* four headline levels */
+.{_NS} .heads {{ display:flex; gap:6px; flex-wrap:wrap; margin-bottom:10px; }}
+.{_NS} .head {{
+  flex:1 1 22%; min-width:78px; text-align:center; padding:7px 4px;
+  border:1px solid {CARD_BORDER}; border-radius:8px;
+}}
+.{_NS} .head .k {{ font-size:10px; color:{FAINT}; letter-spacing:.05em; }}
+.{_NS} .head .v {{ font-size:17px; font-weight:700; color:{BRIGHT}; }}
+
+/* the price ladder */
+.{_NS} .rung {{
+  display:flex; align-items:center; gap:8px; padding:5px 8px;
+  border-left:3px solid transparent; font-size:13px;
+}}
+.{_NS} .rung.is-spot {{
+  background:rgba(255,255,255,.06); border-radius:6px;
+  border-left-color:{BRIGHT}; font-weight:800; font-size:16px;
+}}
+.{_NS} .rung .px {{ min-width:74px; font-weight:700; font-variant-numeric:tabular-nums; }}
+.{_NS} .rung .lb {{ flex:1 1 auto; color:{MUTED}; font-size:12px; }}
+.{_NS} .rung .dz {{ color:{FAINT}; font-size:11px; font-variant-numeric:tabular-nums; }}
+
+/* three-column alignment + pressure lists */
+.{_NS} .cols {{ display:flex; gap:8px; flex-wrap:wrap; }}
+.{_NS} .col {{
+  flex:1 1 30%; min-width:150px; padding:8px 10px;
+  border:1px solid {CARD_BORDER}; border-radius:8px;
+}}
+.{_NS} .col h4 {{ margin:0 0 5px; font-size:11px; color:{FAINT};
+                 letter-spacing:.07em; font-weight:700; }}
+.{_NS} .col .verd {{ font-size:15px; font-weight:800; margin-bottom:4px; }}
+.{_NS} .col li {{ font-size:12px; color:{MUTED}; margin:3px 0; list-style:none; }}
+.{_NS} .col ul {{ margin:0; padding:0; }}
+
+/* energy bars */
+.{_NS} .bar {{ display:flex; align-items:center; gap:7px; margin:4px 0;
+              font-size:13px; }}
+.{_NS} .bar .nm {{ min-width:44px; font-weight:700; }}
+.{_NS} .bar .tr {{ flex:1 1 auto; height:11px; background:rgba(255,255,255,.07);
+                  border-radius:6px; overflow:hidden; }}
+/* ⚠️ `display:block`. The fill is a <span>, and height:100% on an inline box
+   does nothing — the bars rendered as empty grey tracks with the colour
+   nowhere, which is the one thing a bar chart has to get right. */
+.{_NS} .bar .fl {{ display:block; height:100%; border-radius:6px;
+                  min-width:2px; }}
+.{_NS} .bar .vl {{ min-width:34px; text-align:right; font-weight:700;
+                  font-variant-numeric:tabular-nums; }}
+
 /* ── phone: one card per check ───────────────────────────────────── */
 @media (max-width:{_BREAK}px) {{
   .{_NS} {{ padding:10px; }}
@@ -132,6 +186,12 @@ _CSS = f"""<style>
   .{_NS} .counts {{ font-size:15px; }}
   .{_NS} .chip {{ font-size:12.5px; padding:5px 10px; }}
   .{_NS} .why, .{_NS} .conflict {{ font-size:13.5px; }}
+  .{_NS} .verdict .big {{ font-size:26px; }}
+  .{_NS} .head {{ flex:1 1 45%; }}          /* two per line, not four squeezed */
+  .{_NS} .col {{ flex:1 1 100%; }}          /* the three columns stack */
+  .{_NS} .rung {{ font-size:14px; }}
+  .{_NS} .rung.is-spot {{ font-size:18px; }}
+  .{_NS} .rung .lb {{ font-size:12.5px; }}
 }}
 </style>"""
 
@@ -248,8 +308,223 @@ def summary_html(summary: Mapping[str, Any]) -> str:
     return "".join(parts)
 
 
+# ── the dashboard ───────────────────────────────────────────────────────────
+#
+# Everything below draws `alignment.dashboard(read)` — the same rows the table
+# beneath it uses, grouped and sorted. Nothing here reads session state or
+# scores anything, so the ten-second view and the twenty-one-row view cannot
+# tell the trader two different things.
+
+_NET_WORD = {BULL: "BULLISH", BEAR: "BEARISH"}
+_CONV_TONE = {"HIGH": C_BULL, "MODERATE": WARN, "LOW": WARN}
+
+
+def verdict_html(d: Mapping[str, Any]) -> str:
+    """The headline: bias, and how much of the vote actually carries it.
+
+    ⚠️ The conviction is not decoration. "🔴 BEARISH" over 7 of 21 checks and
+    the same words over 19 of 21 are completely different trades, and the old
+    summary printed them identically. A lean is labelled a lean.
+    """
+    net = d.get("net") or NEUTRAL
+    word = _NET_WORD.get(net, "MIXED / NO EDGE")
+    conv = str(d.get("conviction") or "LOW")
+    pct = int(d.get("conviction_pct") or 0)
+    lean = " LEAN" if net in (BULL, BEAR) and conv == "LOW" else ""
+    spot = d.get("spot")
+    c = d.get("counts") or {}
+    return (
+        "<div class='verdict'>"
+        + (f"<div class='spot'>🎯 NIFTY SPOT <b>₹{spot:,.0f}</b></div>"
+           if isinstance(spot, (int, float)) else "")
+        + f"<div class='big' style='color:{_COLOUR.get(net, MICRO)}'>"
+          f"{BALLS.get(net, '⚪')} {word}{lean}</div>"
+        + f"<div class='conv' style='color:{_CONV_TONE.get(conv, WARN)}'>"
+          f"{'⚠️ ' if conv == 'LOW' else ''}{conv} CONVICTION · "
+          f"{d.get('agreement', 0)} of {d.get('active', 0)} active checks "
+          f"({pct}%)</div>"
+        + f"<div class='sub' style='margin-top:5px'>"
+          f"<span style='color:{C_BULL}'>🟢 {c.get('bull', 0)}</span> · "
+          f"<span style='color:{C_BEAR}'>🔴 {c.get('bear', 0)}</span> · "
+          f"<span style='color:{MICRO}'>⚪ {c.get('neutral', 0)}</span> · "
+          f"❓ {c.get('na', 0)}</div>"
+        + "</div>")
+
+
+def heads_html(d: Mapping[str, Any]) -> str:
+    """Spot and the three levels that decide the next move, as four tiles."""
+    h = d.get("heads") or {}
+    tiles = (("🎯 SPOT", h.get("spot"), BRIGHT),
+             ("🟢 SUPPORT", h.get("support"), C_BULL),
+             ("🔴 RESISTANCE", h.get("resistance"), C_BEAR),
+             ("🧲 MAGNET", h.get("magnet"), WARN))
+    cells = "".join(
+        f"<div class='head'><div class='k'>{_esc(k)}</div>"
+        f"<div class='v' style='color:{col}'>{_esc(v)}</div></div>"
+        for k, v, col in tiles)
+    return f"<div class='heads'>{cells}</div>"
+
+
+def ladder_html(d: Mapping[str, Any]) -> str:
+    """The price map — every level in order, spot in its place.
+
+    The single most useful thing on the panel: it answers "what is above me,
+    what is below me, and how far" without reading a word.
+    """
+    rungs = d.get("ladder") or []
+    if not rungs:
+        return ""
+    out = ["<div class='hd'>🗺️ PRICE MAP</div>"]
+    for r in rungs:
+        align = r.get("align") or NA
+        cls = "rung is-spot" if r.get("spot") else "rung"
+        dist = r.get("distance")
+        gap = ("" if dist in (None, 0)
+               else f"<span class='dz'>{dist:+,.0f}</span>")
+        out.append(
+            f"<div class='{cls}' style='border-left-color:"
+            f"{_COLOUR.get(align, FAINT)}'>"
+            f"<span>{BALLS.get(align, '⚪')}</span>"
+            f"<span class='px' style='color:{_COLOUR.get(align, MUTED)}'>"
+            f"₹{r['price']:,.0f}</span>"
+            f"<span class='lb'>{_esc(' · '.join(r.get('labels') or []))}</span>"
+            f"{gap}</div>")
+    return "".join(out)
+
+
+def groups_html(d: Mapping[str, Any]) -> str:
+    """Structure · Options · Dealers side by side, each with what drives it."""
+    groups = d.get("groups") or {}
+    if not groups:
+        return ""
+    pressure = d.get("pressure") or {}
+    icons = {"STRUCTURE": "🏗️", "OPTIONS": "⚡", "DEALERS": "🏦"}
+    cols = []
+    for name, verdict in groups.items():
+        label = {BULL: "BULLISH", BEAR: "BEARISH",
+                 NEUTRAL: "MIXED", NA: "NOT REPORTING"}.get(verdict, "—")
+        # The rows from THIS bucket, so a column names its own drivers rather
+        # than the market's. A MIXED bucket lists BOTH sides — "mixed" with an
+        # empty list is the one verdict that tells the reader nothing, and the
+        # reason it is mixed is exactly what they are looking for.
+        def _own(kind):
+            return [p for p in (pressure.get(kind) or [])
+                    if p.get("bucket") == name]
+        drivers = ([(verdict, p) for p in _own(verdict)][:3] if verdict in (BULL, BEAR)
+                   else [(BULL, p) for p in _own(BULL)][:2]
+                   + [(BEAR, p) for p in _own(BEAR)][:2])
+        items = "".join(f"<li>{BALLS.get(k, '⚪')} {_esc(p['check'])}</li>"
+                        for k, p in drivers)
+        cols.append(
+            f"<div class='col'><h4>{icons.get(name, '')} {_esc(name)}</h4>"
+            f"<div class='verd' style='color:{_COLOUR.get(verdict, FAINT)}'>"
+            f"{BALLS.get(verdict, '❓')} {label}</div>"
+            f"<ul>{items}</ul></div>")
+    return f"<div class='cols'>{''.join(cols)}</div>"
+
+
+def energy_html(d: Mapping[str, Any]) -> str:
+    """CALL vs PUT participation as two bars — which side is being paid for."""
+    e = d.get("energy") or {}
+    ce, pe = e.get("CALL"), e.get("PUT")
+    if ce is None and pe is None:
+        return ""
+    top = max(float(ce or 0), float(pe or 0), 1.0)
+    bars = []
+    for name, val, col in (("CALL", ce, C_BULL), ("PUT", pe, C_BEAR)):
+        v = float(val or 0)
+        hot = " 🔥" if e.get("winner") == name else ""
+        bars.append(
+            f"<div class='bar'><span class='nm' style='color:{col}'>{name}</span>"
+            f"<span class='tr'><span class='fl' style='width:{v / top * 100:.0f}%;"
+            f"background:{col}'></span></span>"
+            f"<span class='vl'>{v:.0f}{hot}</span></div>")
+    winner = e.get("winner")
+    tail = (f"<div class='sub'>{BALLS.get(BULL if winner == 'CALL' else BEAR)} "
+            f"{_esc(e.get('preferred') or (winner + ' side carrying it'))}</div>"
+            if winner else
+            f"<div class='sub'>{_esc(e.get('preferred') or 'balanced')}</div>")
+    return "<div class='hd'>⚡ PREMIUM ENERGY</div>" + "".join(bars) + tail
+
+
+def conflict_html(d: Mapping[str, Any]) -> str:
+    """Bullish defence against bearish pressure, side by side.
+
+    The old panel buried this under the counts. When the net read is a lean,
+    what is arguing with it is the most useful thing on the screen.
+    """
+    pressure = d.get("pressure") or {}
+    bulls, bears = pressure.get(BULL) or [], pressure.get(BEAR) or []
+    if not bulls and not bears:
+        return ""
+    conv = str(d.get("conviction") or "LOW")
+    level = "HIGH" if conv == "LOW" else "MODERATE" if conv == "MODERATE" else "LOW"
+
+    def _side(title, items, colour):
+        li = "".join(f"<li>{_esc(p['check'])} — {_esc(p['why'])}</li>"
+                     for p in items[:4]) or "<li>—</li>"
+        return (f"<div class='col'><h4 style='color:{colour}'>{title}</h4>"
+                f"<ul>{li}</ul></div>")
+
+    return ("<div class='hd'>⚔️ CONFLICT: " + level + "</div><div class='cols'>"
+            + _side("🟢 BULLISH DEFENCE", bulls, C_BULL)
+            + _side("🔴 BEARISH PRESSURE", bears, C_BEAR)
+            + "</div>")
+
+
+#: gate state → (icon, headline). The words are the Entry Gate's own states;
+#: this only dresses them.
+_GATE = {
+    "WAIT": ("⏸", "WAIT"), "AT_ZONE_WAIT": ("⏸", "AT ZONE — WAIT"),
+    "CHOP_WAIT": ("〰️", "CHOP — WAIT"), "NO_ROOM": ("📏", "NO ROOM — WAIT"),
+    "PINNED": ("🧲", "PINNED — NO EDGE"), "REVERSED": ("⚠️", "BIAS AGAINST ZONE"),
+    "ARMED_CALL": ("🟢", "ARMED — CALL"), "ARMED_PUT": ("🔴", "ARMED — PUT"),
+    "CALL": ("🟢", "CONFIRMED — CALL"), "PUT": ("🔴", "CONFIRMED — PUT"),
+}
+
+
+def gate_html(d: Mapping[str, Any]) -> str:
+    """The Entry Gate's verdict, transported.
+
+    ⚠️ This panel does NOT decide whether to trade. `compute_market_picture`
+    owns the gate — its state, target, invalidation and R:R — and printing a
+    second opinion here would put two answers to "do I take this" on one
+    screen. What is shown is what the gate said, worded, and nothing else.
+    """
+    g = d.get("gate") or {}
+    state = str(g.get("state") or "")
+    if not state:
+        return ""
+    icon, word = _GATE.get(state, ("🎯", state.replace("_", " ")))
+    tone = (C_BULL if "CALL" in state else C_BEAR if "PUT" in state else WARN)
+    bits = []
+    for key, label in (("level", "at"), ("target", "target"),
+                       ("invalidation", "invalid below/above")):
+        v = g.get(key)
+        if isinstance(v, (int, float)):
+            bits.append(f"{label} ₹{v:,.0f}")
+    if isinstance(g.get("rr"), (int, float)):
+        bits.append(f"R:R {g['rr']:.1f}")
+    why = "; ".join(str(w) for w in (g.get("why") or [])[:2])
+    return ("<div class='hd'>🎯 ENTRY GATE</div>"
+            f"<div class='net' style='color:{tone}'>{icon} {_esc(word)}</div>"
+            + (f"<div class='sub'>{_esc(' · '.join(bits))}</div>" if bits else "")
+            + (f"<div class='why'>{_esc(why)}</div>" if why else "")
+            + f"<div class='sub' style='color:{FAINT}'>the app's own gate — "
+              "this panel reports it, it does not decide it</div>")
+
+
 def render(st, read: Optional[Mapping[str, Any]], slot=None) -> None:
-    """Draw the checklist into `slot` (or straight onto the page).
+    """Draw the dashboard into `slot`, with the full checklist behind an expander.
+
+    The layout answers the market in the order a trader asks it:
+
+        verdict → where am I → what is above and below → who is pushing
+        → what is arguing → what the gate says → (expand) every check
+
+    The 21-row table is not gone, and that is deliberate. The dashboard is the
+    scan; the table is the audit. A summary you cannot check is a summary you
+    have to trust, and every number on the dashboard comes from a row in there.
 
     Never raises: the checklist is a view over other layers, and a formatting
     fault in it must not take down the cycle that produced the numbers.
@@ -261,14 +536,26 @@ def render(st, read: Optional[Mapping[str, Any]], slot=None) -> None:
             target.info("🧭 **Market Alignment** standing by — no checks have "
                         "reported yet this cycle.")
             return
-        spot = (read or {}).get("spot")
-        head = ("<div class='hd'>🧭 MIOS MARKET ALIGNMENT CHECKLIST"
-                + (f" · spot ₹{spot:,.0f}" if isinstance(spot, (int, float))
-                   else "") + "</div>")
-        body = (_CSS + f"<div class='{_NS}'>" + head + table_html(rows)
-                + "</div>" + summary_html((read or {}).get("summary") or {}))
+        from ..alignment import dashboard as _dash
+        d = _dash(read or {})
+        head = "<div class='hd'>🧭 MIOS ALIGNMENT DASHBOARD</div>"
+        body = (_CSS
+                + f"<div class='{_NS}'>" + head + verdict_html(d)
+                + heads_html(d) + ladder_html(d) + "</div>"
+                + f"<div class='{_NS}'>" + groups_html(d) + "</div>"
+                + f"<div class='{_NS}'>" + energy_html(d) + "</div>"
+                + f"<div class='{_NS}'>" + conflict_html(d) + "</div>"
+                + f"<div class='{_NS}'>" + gate_html(d) + "</div>")
         with target.container():
             st.markdown(body, unsafe_allow_html=True)
+            # The audit trail, collapsed. Same rows, same numbers — this is
+            # where a dashboard figure gets checked, not a second opinion.
+            with st.expander("🔍 Detailed alignment — all "
+                             f"{len(rows)} checks", expanded=False):
+                st.markdown(
+                    _CSS + f"<div class='{_NS}'>" + table_html(rows) + "</div>"
+                    + summary_html((read or {}).get("summary") or {}),
+                    unsafe_allow_html=True)
     except Exception as err:                       # pragma: no cover - display guard
         try:
             target.caption(f"Market Alignment unavailable: {err}")

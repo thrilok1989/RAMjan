@@ -1223,3 +1223,147 @@ def test_the_css_ships_with_the_panel_not_separately():
     P = _panel()
     render_src = pathlib.Path(P.__file__).read_text().split("def render")[1]
     assert "_CSS" in render_src
+
+
+# ── 16 · the dashboard ──────────────────────────────────────────────────────
+#
+# Twenty-one rows of five columns is a complete answer and a slow one. The
+# dashboard is the same data grouped and sorted — it must never be a second
+# read, or the ten-second view and the audit view would tell a trader two
+# different things.
+
+def _dash(ss=None):
+    return A.dashboard(A.build(ss if ss is not None else _ss()))
+
+
+def test_the_dashboard_reads_the_built_rows_not_the_session():
+    """It takes the READ, not session state, so there is one pass over the
+    market per cycle and the two views are provably the same data."""
+    import inspect
+    sig = inspect.signature(A.dashboard)
+    assert list(sig.parameters) == ["read"], "it must take the read, not state"
+    body = inspect.getsource(A.dashboard).split('"""', 2)[-1]
+    # no session key is reachable from here — the read is the only input
+    for key in ("_market_picture", "_reaction_sr", "_gex_data", "_leg_profiles",
+                "_atm_leg_ltp", "_premium_energy", "_money_flow_data"):
+        assert key not in body, f"dashboard() reaches for {key}"
+
+
+def test_conviction_separates_a_lean_from_an_alignment():
+    """"🔴 BEARISH" over 7 of 21 checks and the same words over 19 of 21 are
+    completely different trades, and the old summary printed them identically."""
+    assert A.conviction({"agreement": 19, "active": 21})[0] == "HIGH"
+    assert A.conviction({"agreement": 13, "active": 21})[0] == "MODERATE"
+    assert A.conviction({"agreement": 7, "active": 21}) == ("LOW", 33)
+    # nothing reporting is not high conviction
+    assert A.conviction({"agreement": 0, "active": 0}) == ("LOW", 0)
+
+
+def test_the_ladder_is_ordered_high_to_low_with_spot_in_place():
+    d = _dash()
+    prices = [r["price"] for r in d["ladder"]]
+    assert prices == sorted(prices, reverse=True)
+    spots = [i for i, r in enumerate(d["ladder"]) if r["spot"]]
+    assert len(spots) == 1, "spot appears exactly once"
+    i = spots[0]
+    assert all(r["price"] >= d["spot"] for r in d["ladder"][:i])
+    assert all(r["price"] <= d["spot"] for r in d["ladder"][i + 1:])
+
+
+def test_levels_on_the_same_strike_collapse_to_one_rung():
+    """The magnet and the PUT wall are routinely the same strike. Two lines a
+    pixel apart say "two things" where the market has one."""
+    ss = _ss()
+    ss["_market_picture"] = dict(ss["_market_picture"],
+                                 oi_floor=(24300, 9e4), oi_pin=(24302, "max OI"))
+    ss["_cached_option_data"] = {"max_pain_strike": 24302.0}
+    # the rung is priced at whichever level was met first; what matters is that
+    # the wall and the magnet ended up on the SAME one
+    rungs = [r for r in _dash(ss)["ladder"] if "PUT Wall OI" in r["labels"]]
+    assert len(rungs) == 1
+    assert "Charm Pin / Magnet" in rungs[0]["labels"], rungs[0]["labels"]
+    assert all(abs(rungs[0]["price"] - p) <= A.RUNG_TOLERANCE
+               for p in (24300, 24302))
+
+
+def test_a_premium_never_lands_on_the_index_ladder():
+    """A leg at ₹95 sorted into index prices would place the call below every
+    level and above nothing. Only index-axis rows carry a numeric level."""
+    for r in A.build(_ss())["rows"]:
+        if r["group"] == A.PREMIUM:
+            assert r.get("level") is None, r["check"]
+    assert all(x["price"] > 1000 for x in _dash()["ladder"])
+
+
+def test_a_rung_reports_neutral_when_its_rows_disagree_and_na_only_when_silent():
+    """Collapsing "they disagree" and "nobody reported" into one glyph loses
+    the difference between a contested level and an absent one."""
+    mixed = A.ladder([{"check": "A", "level": 100.0, "align": BB.BULL},
+                      {"check": "B", "level": 101.0, "align": BB.BEAR}], None)
+    assert mixed[0]["align"] == BB.NEUTRAL
+    quiet = A.ladder([{"check": "A", "level": 100.0, "align": A.NA}], None)
+    assert quiet[0]["align"] == A.NA
+    agreed = A.ladder([{"check": "A", "level": 100.0, "align": BB.BULL},
+                       {"check": "B", "level": 101.0, "align": BB.BULL}], None)
+    assert agreed[0]["align"] == BB.BULL
+
+
+def test_each_pressure_entry_names_its_bucket():
+    """Without it the three columns can only be handed the global bull/bear
+    list, and the dealer magnet shows up under OPTIONS."""
+    d = _dash()
+    for side in (BB.BULL, BB.BEAR):
+        for p in d["pressure"][side]:
+            assert p["bucket"] in A.BUCKETS, p
+
+
+def test_a_column_only_names_drivers_it_owns():
+    from mios_v5.ui import alignment_panel as P
+    d = _dash()
+    html = P.groups_html(d)
+    # split on the column boundary, not on a guessed closing tag
+    cols = html.split("<div class='col'>")[1:]
+    options = next(c for c in cols if "OPTIONS" in c)
+    for p in d["pressure"][BB.BEAR]:
+        if p["bucket"] != A.B_OPTIONS:
+            assert p["check"] not in options, (
+                f"{p['check']} is a {p['bucket']} row shown under OPTIONS")
+
+
+def test_the_gate_is_transported_not_recomputed():
+    """`compute_market_picture` owns the entry decision. A second verdict here
+    would put two answers to "do I take this" on one screen."""
+    src = pathlib.Path(A.__file__).read_text()
+    for banned in ("def _entry_gate", "def compute_entry", "'ARMED_'"):
+        assert banned not in src
+    ss = _ss()
+    gate = {"state": "ARMED_PUT", "level": 24400.0, "target": 24300.0,
+            "rr": 2.1, "why": ["armed at resistance"]}
+    ss["_market_picture"] = dict(ss["_market_picture"], entry_gate=gate)
+    assert _dash(ss)["gate"]["state"] == "ARMED_PUT"
+    assert _dash(ss)["gate"]["rr"] == 2.1
+
+
+def test_the_energy_read_matches_the_row_it_is_drawn_beside():
+    """Two lookups of the same number are two chances to drift."""
+    read = A.build(_ss())
+    e = read["energy"]
+    row = _by_check(read, "Premium Energy")
+    assert f"{e['CALL']:.0f}" in row["value"] and f"{e['PUT']:.0f}" in row["value"]
+    assert e["winner"] == "PUT"
+
+
+def test_the_dashboard_survives_an_empty_market():
+    d = _dash({})
+    assert d["conviction"] == "LOW" and d["conviction_pct"] == 0
+    assert d["ladder"] == [] and d["energy"] == {}
+    assert d["pressure"][BB.BULL] == [] and d["pressure"][BB.BEAR] == []
+
+
+def test_the_detail_table_is_still_reachable():
+    """The dashboard is the scan; the table is the audit. A summary you cannot
+    check is a summary you have to trust."""
+    from mios_v5.ui import alignment_panel as P
+    src = pathlib.Path(P.__file__).read_text()
+    assert "Detailed alignment" in src
+    assert "table_html(rows)" in src

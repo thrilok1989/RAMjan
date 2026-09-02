@@ -1129,3 +1129,97 @@ def test_the_walls_and_the_barriers_agree_on_the_rule():
     read = A.build(ss)
     assert _by_check(read, "CALL Wall OI")["align"] == BB.BULL
     assert _by_check(read, "NIFTY Resistance")["align"] == BB.BULL
+
+
+# ── 15 · it has to survive a phone ──────────────────────────────────────────
+#
+# Five columns at eleven pixels is a fine desktop table and unreadable on a
+# handset, which is where this gets looked at during a session. Two layouts
+# over ONE set of markup — a phone branch that built different HTML would be a
+# second renderer to keep in step, and the two would drift the first time a
+# column was added.
+
+def _panel():
+    from mios_v5.ui import alignment_panel as P
+    return P
+
+
+def test_one_markup_two_layouts():
+    """The phone view must be CSS over the same rows, not a second builder."""
+    P = _panel()
+    src = pathlib.Path(P.__file__).read_text()
+    assert "@media" in P._CSS
+    # exactly one function emits rows, for both layouts
+    assert src.count("def _row_html") == 1
+    assert "mobile" not in src.lower().replace("automobile", "")
+
+
+def test_the_breakpoint_turns_the_table_into_cards():
+    P = _panel()
+    css = P._CSS
+    assert f"@media (max-width:{P._BREAK}px)" in css
+    for rule in ("thead", "display:none", "display:flex", "flex-wrap:wrap"):
+        assert rule in css, rule
+
+
+def test_the_verdict_sits_beside_the_name_not_below_it():
+    """The cells are emitted in table order and the verdict is the fourth. On a
+    phone it belongs beside the NAME, three cells earlier — `order` does that.
+    Floating it right made it drop past the value and land beside whatever
+    happened to be tall, which put the ball under the wrong line."""
+    P = _panel()
+    # only the phone half of the sheet — the desktop table has no order at all
+    phone = P._CSS.split("@media", 1)[1]
+    # the name is ordered first and the verdict second, ahead of the value
+    # (third) that comes between them in source order
+    for cls, order in ((".c-check", 1), (".c-align", 2), (".c-value", 3)):
+        seg = phone.split(cls, 1)[-1][:140]
+        assert f"order:{order}" in seg, f"{cls} is not ordered {order}"
+    # and the float that caused the drop is gone
+    assert "float:right" not in P._CSS
+
+
+def test_a_label_is_not_set_at_price_size():
+    """"Balanced delta positioning" at 22px swamps the card; ₹24,050 at 22px is
+    the point of the card."""
+    P = _panel()
+    long_row = {"check": "Dealer DEX", "value": "Balanced delta positioning",
+                "position": "—", "align": A.NEUTRAL, "remark": "", "observed": True}
+    short_row = dict(long_row, check="PUT Wall OI", value="₹24,050")
+    assert "c-value long" in P._row_html(long_row)
+    assert "long" not in P._row_html(short_row).split("c-value")[1][:12]
+    assert ".c-value.long" in P._CSS
+
+
+def test_an_empty_cell_does_not_leave_a_blank_line_on_a_phone():
+    """A row with no value or position is a stack of gaps otherwise."""
+    P = _panel()
+    html = P._row_html({"check": "War Zone", "value": "—", "position": "—",
+                        "align": A.NA, "remark": "no battle zone",
+                        "observed": False})
+    assert "c-value none" in html and "none" in html
+    assert ".c-value.none" in P._CSS and "display:none" in P._CSS
+
+
+def test_the_stylesheet_cannot_restyle_another_panel():
+    """Every selector is under the panel's own class. A bare `table {}` here
+    would reach the terminal's tables and the option chain."""
+    P = _panel()
+    body = P._CSS.split("<style>")[1].split("</style>")[0]
+    for line in body.splitlines():
+        line = line.strip()
+        if not line or line.startswith(("/*", "*", "@media", "}", "{")):
+            continue
+        if "{" in line and not line.startswith("."):
+            raise AssertionError(f"unscoped selector: {line}")
+        if line.startswith(".") and P._NS not in line:
+            raise AssertionError(f"selector outside the namespace: {line}")
+
+
+def test_the_css_ships_with_the_panel_not_separately():
+    """It goes out inside the same markdown call as the table. Injected once
+    somewhere else, a rerun that skips the panel would leave its rules behind —
+    and a rerun that skips the injector would render the table unstyled."""
+    P = _panel()
+    render_src = pathlib.Path(P.__file__).read_text().split("def render")[1]
+    assert "_CSS" in render_src

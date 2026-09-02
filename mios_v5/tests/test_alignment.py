@@ -1361,6 +1361,50 @@ def test_the_dashboard_survives_an_empty_market():
     assert d["pressure"][BB.BULL] == [] and d["pressure"][BB.BEAR] == []
 
 
+def test_the_gate_leads_the_panel():
+    """It is the decision; everything under it is the reasoning. Same rule that
+    put the Trade Card above this panel — an answer you have to scroll to is an
+    answer arriving late."""
+    import inspect
+    from mios_v5.ui import alignment_panel as P
+    body = inspect.getsource(P.render)
+    for later in ("verdict_html(d)", "ladder_html(d)", "legs_html(d)",
+                  "conflict_html(d)"):
+        assert body.index("gate_html(d)") < body.index(later), later
+
+
+def test_the_energy_bar_is_drawn_on_the_zero_to_hundred_scale():
+    """Scaled against each other, a PUT of 56 drew a completely FULL bar with
+    the word HEALTHY printed beside it, and 12 vs 10 looked like a rout. The
+    score is a percentage; the track is that percentage's scale."""
+    from mios_v5.ui import alignment_panel as P
+    html = P.energy_html({"energy": {"CALL": 30, "PUT": 56, "winner": "PUT"}})
+    assert "width:30%" in html, "CALL 30 must draw 30% of the track"
+    assert "width:56%" in html, "PUT 56 must draw 56%, not a full bar"
+    assert "width:100%" not in html, "nothing here is at full energy"
+
+
+def test_the_energy_bar_never_overflows_its_track():
+    """A score outside 0-100 is the producer's business, not a reason to draw a
+    bar past the end of its own scale."""
+    from mios_v5.ui import alignment_panel as P
+    html = P.energy_html({"energy": {"CALL": 140, "PUT": -20}})
+    assert "width:100%" in html and "width:0%" in html
+    assert "width:140%" not in html and "width:-20%" not in html
+
+
+def test_the_energy_bands_are_not_redefined_by_the_panel():
+    """The ticks mark Weak/Healthy/Strong. If the panel hardcoded the edges,
+    re-banding premium_energy would leave the scale lying about itself."""
+    from mios_v5.ui import alignment_panel as P
+    from mios_v5.premium_energy import _ENERGY_BANDS
+    ticks = P._band_ticks()
+    for edge, _word in _ENERGY_BANDS:
+        assert (f"left:{edge}%" in ticks) == (0 < edge < 100), edge
+    src = pathlib.Path(P.__file__).read_text().split("def _band_ticks")[1]
+    assert "_ENERGY_BANDS" in src.split("_ticks =")[0], "edges must come from the owner"
+
+
 def test_the_detail_table_is_still_reachable():
     """The dashboard is the scan; the table is the audit. A summary you cannot
     check is a summary you have to trust."""

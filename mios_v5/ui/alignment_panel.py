@@ -98,6 +98,9 @@ _CSS = f"""<style>
   border:1px solid {CARD_BORDER}; border-radius:7px; font-size:12px;
 }}
 .{_NS} .net {{ font-size:17px; font-weight:800; margin:8px 0 3px; }}
+/* the gate leads the panel, so it is sized as the headline it now is */
+.{_NS} .gate {{ font-size:28px; font-weight:800; line-height:1.15;
+               margin:2px 0 4px; }}
 .{_NS} .sub {{ font-size:12px; color:{FAINT}; margin-bottom:8px; }}
 .{_NS} .why {{ font-size:13px; color:{MUTED}; margin-bottom:5px; }}
 .{_NS} .why b {{ color:{BRIGHT}; }}
@@ -149,7 +152,12 @@ _CSS = f"""<style>
               font-size:13px; }}
 .{_NS} .bar .nm {{ min-width:44px; font-weight:700; }}
 .{_NS} .bar .tr {{ flex:1 1 auto; height:11px; background:rgba(255,255,255,.07);
-                  border-radius:6px; overflow:hidden; }}
+                  border-radius:6px; overflow:hidden; position:relative; }}
+/* band boundaries on the 0-100 track — they mark where Weak becomes Healthy
+   and Healthy becomes Strong. Absolute, so they paint over the fill rather
+   than being clipped by it; faint, so they read as a scale and not as data. */
+.{_NS} .bar .tk {{ position:absolute; top:0; bottom:0; width:1px;
+                  background:rgba(255,255,255,.18); }}
 /* ⚠️ `display:block`. The fill is a <span>, and height:100% on an inline box
    does nothing — the bars rendered as empty grey tracks with the colour
    nowhere, which is the one thing a bar chart has to get right. */
@@ -227,6 +235,7 @@ _CSS = f"""<style>
   .{_NS} .chip {{ font-size:12.5px; padding:5px 10px; }}
   .{_NS} .why, .{_NS} .conflict {{ font-size:13.5px; }}
   .{_NS} .verdict .big {{ font-size:26px; }}
+  .{_NS} .gate {{ font-size:25px; }}
   .{_NS} .head {{ flex:1 1 45%; }}          /* two per line, not four squeezed */
   .{_NS} .col {{ flex:1 1 100%; }}          /* the three columns stack */
   .{_NS} .rung {{ font-size:14px; }}
@@ -469,20 +478,44 @@ def groups_html(d: Mapping[str, Any]) -> str:
     return f"<div class='cols'>{''.join(cols)}</div>"
 
 
+#: Band boundaries drawn on the energy track, so a bar can be read as "Weak"
+#: or "Strong" without doing the arithmetic. The EDGES ARE NOT REDEFINED here —
+#: `premium_energy._ENERGY_BANDS` owns them (0-20 Dead · 21-40 Weak · 41-60
+#: Healthy · 61-80 Strong · 81-100 Explosive), so re-banding the scale there
+#: moves these ticks with it. The last edge is 100, the end of the track: no
+#: tick, it would just draw over the border.
+def _band_ticks() -> str:
+    try:
+        from ..premium_energy import _ENERGY_BANDS as bands
+    except Exception:          # the panel still draws if the owner moves
+        return ""
+    return "".join(f"<i class='tk' style='left:{edge}%'></i>"
+                   for edge, _word in bands if 0 < edge < 100)
+
+
+_ticks = _band_ticks()
+
+
 def energy_html(d: Mapping[str, Any]) -> str:
     """CALL vs PUT participation as two bars — which side is being paid for."""
     e = d.get("energy") or {}
     ce, pe = e.get("CALL"), e.get("PUT")
     if ce is None and pe is None:
         return ""
-    top = max(float(ce or 0), float(pe or 0), 1.0)
     bars = []
     for name, val, col in (("CALL", ce, C_BULL), ("PUT", pe, C_BEAR)):
         v = float(val or 0)
         hot = " 🔥" if e.get("winner") == name else ""
+        # ⚖️ The track is the 0-100 energy scale, NOT the larger of the two.
+        # Scaled against each other a PUT of 56 drew a completely FULL bar with
+        # the word HEALTHY beside it, and 12 vs 10 looked like a rout. The score
+        # is already a percentage and `premium_energy.energy_band` bands it over
+        # 0-100, so the bar is drawn on that scale and agrees with its own label.
+        # Which side leads is still readable — same scale, plus the 🔥 on the winner.
         bars.append(
             f"<div class='bar'><span class='nm' style='color:{col}'>{name}</span>"
-            f"<span class='tr'><span class='fl' style='width:{v / top * 100:.0f}%;"
+            f"<span class='tr'>{_ticks}"
+            f"<span class='fl' style='width:{max(0.0, min(100.0, v)):.0f}%;"
             f"background:{col}'></span></span>"
             f"<span class='vl'>{v:.0f}{hot}</span></div>")
     winner = e.get("winner")
@@ -656,8 +689,8 @@ def gate_html(d: Mapping[str, Any]) -> str:
     if isinstance(g.get("rr"), (int, float)):
         bits.append(f"R:R {g['rr']:.1f}")
     why = "; ".join(str(w) for w in (g.get("why") or [])[:2])
-    return ("<div class='hd'>🎯 ENTRY GATE</div>"
-            f"<div class='net' style='color:{tone}'>{icon} {_esc(word)}</div>"
+    return ("<div class='hd'>🎯 ENTRY GATE — CURRENT ACTION</div>"
+            f"<div class='gate' style='color:{tone}'>{icon} {_esc(word)}</div>"
             + (f"<div class='sub'>{_esc(' · '.join(bits))}</div>" if bits else "")
             + (f"<div class='why'>{_esc(why)}</div>" if why else "")
             + f"<div class='sub' style='color:{FAINT}'>the app's own gate — "
@@ -689,15 +722,18 @@ def render(st, read: Optional[Mapping[str, Any]], slot=None) -> None:
         from ..alignment import dashboard as _dash
         d = _dash(read or {})
         head = "<div class='hd'>🧭 MIOS ALIGNMENT DASHBOARD</div>"
+        # 🥇 The gate is FIRST. It is the decision; everything under it is the
+        # reasoning. Same rule that put the Trade Card above this panel — an
+        # answer you have to scroll to is an answer arriving late.
         body = (_CSS
-                + f"<div class='{_NS}'>" + head + verdict_html(d)
+                + f"<div class='{_NS}'>" + head + gate_html(d) + "</div>"
+                + f"<div class='{_NS}'>" + verdict_html(d)
                 + heads_html(d) + ladder_html(d) + "</div>"
                 + f"<div class='{_NS}'>" + legs_html(d) + "</div>"
                 + f"<div class='{_NS}'>" + energy_html(d) + "</div>"
                 + f"<div class='{_NS}'>" + chain_html(d) + "</div>"
                 + f"<div class='{_NS}'>" + groups_html(d) + "</div>"
-                + f"<div class='{_NS}'>" + conflict_html(d) + "</div>"
-                + f"<div class='{_NS}'>" + gate_html(d) + "</div>")
+                + f"<div class='{_NS}'>" + conflict_html(d) + "</div>")
         with target.container():
             st.markdown(body, unsafe_allow_html=True)
             # The audit trail, collapsed. Same rows, same numbers — this is

@@ -427,7 +427,8 @@ def _resolve(chart: str, role: str,
 
 def _row(group: str, bucket: str, check: str, value: str, position: str,
          align: str, remark: str = "", observed: bool = True,
-         level: Optional[float] = None) -> Dict[str, Any]:
+         level: Optional[float] = None,
+         levels: Optional[Sequence[float]] = None) -> Dict[str, Any]:
     """One line of the checklist.
 
     `level` is the row's price as a NUMBER, and only index-axis rows carry it:
@@ -438,7 +439,11 @@ def _row(group: str, bucket: str, check: str, value: str, position: str,
     """
     return {"group": group, "bucket": bucket, "check": check, "value": value,
             "position": position, "align": align, "remark": remark,
-            "observed": bool(observed), "level": _f(level)}
+            "observed": bool(observed), "level": _f(level),
+            # every number behind `value`, on the row's OWN axis. The leg
+            # ladders are built from these, so the map under a premium and the
+            # text beside it cannot name different prices.
+            "levels": [x for x in (_f(v) for v in (levels or ())) if x is not None]}
 
 
 def _na_row(group: str, bucket: str, check: str, why: str) -> Dict[str, Any]:
@@ -890,6 +895,10 @@ def _premium(ss: Mapping[str, Any], zones: Sequence[Mapping[str, Any]]) -> List[
     # zones (too few bars to form one) and the row set should not shrink for it.
     _keys = set(ltps) | set(vob) | set(_map(ss.get("_atm_leg_dfs")))
     _resolved = dict(zip(("CALL", "PUT"), _leg_keys.call_put(_keys)))
+    #: buy-volume share per leg, as `analyze_vob_volume` measured it inside the
+    #: zone the premium is actually at. Collected here rather than re-derived
+    #: for the battle card, so the card and the row quote one number.
+    buy_pct: Dict[str, Optional[float]] = {}
 
     def _leg_label(chart: str) -> Optional[str]:
         """The published label when it still names a live leg, else the one
@@ -980,15 +989,17 @@ def _premium(ss: Mapping[str, Any], zones: Sequence[Mapping[str, Any]]) -> List[
                 remark = (f"{nearest.get('dominant') or '—'} dominant · "
                           f"{_f(nearest.get('bull_pct')) or 0:.0f}% buy volume")
                 align = _level_align(chart, role, holding)
+                buy_pct[chart] = _f(nearest.get("bull_pct"))
             rows.append(_row(
                 PREMIUM, B_OPTIONS, check, _levels_text(_by_distance(mids, ltp), 2),
-                position, align, remark))
+                position, align, remark, levels=mids))
 
         # The premium itself. Reported, never scored: a price is not a
         # direction, and the leg's S/R rows above are where its behaviour votes.
         rows.append(_row(PREMIUM, B_OPTIONS, f"{chart} LTP Price",
                          _rupees(ltp), "—", INFO,
-                         f"{name} — current premium" if name else "leg not resolved")
+                         f"{name} — current premium" if name else "leg not resolved",
+                         levels=[ltp] if ltp is not None else None)
                     if ltp is not None else
                     _na_row(PREMIUM, B_OPTIONS, f"{chart} LTP Price",
                             "leg frame not published this cycle"))
@@ -1019,7 +1030,15 @@ def _premium(ss: Mapping[str, Any], zones: Sequence[Mapping[str, Any]]) -> List[
             rows.append(_row(
                 PREMIUM, B_OPTIONS, check, _levels_text(_by_distance(pts, ltp), 2),
                 f"{BALLS.get(align, icon)} {_pos}", align,
-                f"LTP {_rupees(ltp)} · {len(pts)} line(s)", observed=False))
+                f"LTP {_rupees(ltp)} · {len(pts)} line(s)", observed=False,
+                levels=pts))
+    # The buy share belongs to the LEG, not to the zone row that measured it —
+    # the battle card wants it beside the premium. Attached here so both quote
+    # the same number rather than each finding its own.
+    for r in rows:
+        check = str(r.get("check") or "")
+        if check.endswith("LTP Price"):
+            r["buy_pct"] = buy_pct.get(check.split()[0])
     return rows
 
 
@@ -1242,27 +1261,114 @@ def ladder(rows: Sequence[Mapping[str, Any]],
     return rungs
 
 
-def _leg_card(rows: Sequence[Mapping[str, Any]], chart: str) -> Dict[str, Any]:
-    """One leg's rows, collected — premium, energy and its own structure."""
-    want = {f"{chart} LTP Price": "premium",
-            f"{chart} LTP Support": "support",
-            f"{chart} LTP Resistance": "resistance",
-            f"{chart} HVP HIGH": "hvp_high",
-            f"{chart} HVP LOW": "hvp_low"}
-    out: Dict[str, Any] = {"chart": chart, "fields": []}
-    for r in rows:
-        key = want.get(str(r.get("check")))
-        if not key:
+#: what a leg's own premium is doing, on its OWN axis.
+#:
+#: ⚠️ Not the same as the row's alignment, and the difference is the whole
+#: point of the battle card. Every leg row is published in NIFTY terms — a PUT
+#: holding its support votes BEAR, because a strong put means a falling index.
+#: Read back the other way, that same row says the PUT premium is STRONG.
+#: Showing "🔴 Bear" in a card headed "PUT SIDE" would have the trader reading
+#: it as the put being weak.
+STRONG, WEAK = "STRONG", "WEAK"
+
+
+def _energy_band(score: Optional[float]) -> Optional[str]:
+    """Stage 71.7's own word for an energy score. None when it did not report."""
+    if score is None:
+        return None
+    try:
+        from .premium_energy import energy_band
+        return energy_band(score)
+    except Exception:
+        return None
+
+
+def leg_strength(chart: str, nifty_align: str) -> Optional[str]:
+    """A leg row's NIFTY direction → what that says about the PREMIUM.
+
+    A CALL reads straight (bullish for NIFTY = the call is strong); a PUT
+    inverts, for the same reason `bias_ball` inverts it on the way out. This is
+    that mapping run backwards, and it lives here so the battle card cannot
+    invent a second one.
+    """
+    if nifty_align not in (BULL, BEAR):
+        return None
+    up = nifty_align == BULL
+    return (STRONG if up else WEAK) if str(chart).upper() == "CALL" \
+        else (WEAK if up else STRONG)
+
+
+def leg_ladder(rows: Sequence[Mapping[str, Any]], chart: str
+               ) -> List[Dict[str, Any]]:
+    """One leg's own levels as a price map, with its premium in place.
+
+    The same idea as the index ladder and deliberately a separate map: a ₹107
+    call premium and a 24,050 index level share no axis. Built from the rows'
+    `levels`, so the ladder and the text beside it cannot name different prices.
+    """
+    mine = [r for r in rows if str(r.get("check", "")).startswith(chart + " ")]
+    ltp = next((r["levels"][0] for r in mine
+                if str(r.get("check", "")).endswith("LTP Price") and r["levels"]),
+               None)
+    pts: List[Tuple[float, Mapping[str, Any]]] = []
+    for r in mine:
+        if str(r.get("check", "")).endswith("LTP Price"):
             continue
-        if key == "premium":
-            out["premium"] = r.get("value")
-            out["leg"] = r.get("remark")
-        else:
-            out["fields"].append({"name": key.replace("_", " ").title(),
-                                  "value": r.get("value"),
-                                  "align": r.get("align"),
-                                  "note": r.get("position")})
-    return out
+        label = str(r["check"])[len(chart) + 1:]
+        for v in r.get("levels") or ():
+            pts.append((v, {"label": label, "align": r.get("align")}))
+    rungs: List[Dict[str, Any]] = []
+    for price, meta in sorted(pts, key=lambda t: -t[0]):
+        # a leg's levels cluster proportionally — ₹0.50 apart is one line on a
+        # ₹5 premium and two on a ₹300 one
+        tol = max(abs(price) * 0.01, 0.05)
+        if rungs and abs(rungs[-1]["price"] - price) <= tol:
+            rungs[-1]["labels"].append(meta["label"])
+            continue
+        rungs.append({"price": price, "labels": [meta["label"]],
+                      "align": meta["align"], "ltp": False})
+    if ltp is not None:
+        at = next((i for i, r in enumerate(rungs) if r["price"] < ltp), len(rungs))
+        rungs.insert(at, {"price": ltp, "labels": ["LTP NOW"], "align": INFO,
+                          "ltp": True})
+    return rungs
+
+
+def _leg_card(rows: Sequence[Mapping[str, Any]], chart: str,
+              energy: Mapping[str, Any]) -> Dict[str, Any]:
+    """One side of the CE/PE battle: premium, energy, buy share, its own map.
+
+    Every figure is a leg row the table already built. The card's own verdict
+    is the majority of what its rows say about the PREMIUM (`leg_strength`),
+    which is why it can read "PUT STRONG" while those same rows vote bearish
+    for the index — that is the conflict the card exists to show.
+    """
+    mine = [r for r in rows if str(r.get("check", "")).startswith(chart + " ")]
+    price_row = next((r for r in mine
+                      if str(r.get("check", "")).endswith("LTP Price")), {})
+    fields = [{"name": str(r["check"])[len(chart) + 1:], "value": r.get("value"),
+               "align": r.get("align"), "note": r.get("position"),
+               "strength": leg_strength(chart, r.get("align"))}
+              for r in mine if not str(r["check"]).endswith("LTP Price")]
+    return {
+        "chart": chart,
+        "leg": price_row.get("remark"),
+        "premium": price_row.get("value"),
+        "buy_pct": price_row.get("buy_pct"),
+        "energy": _f(_map(energy).get(chart)),
+        # ⚠️ The band is Stage 71.7's, not this module's.
+        #
+        # The first attempt scored the card by a majority of its own level rows
+        # — invented here, and it read STRONG for a call whose energy was 30,
+        # because a resistance far overhead and a pivot just below outvoted the
+        # one row that mattered. `premium_energy.energy_band` already answers
+        # "is this premium strong" on the scale the rest of the app uses
+        # (0-20 Dead · 21-40 Weak · 41-60 Healthy · 61-80 Strong), so it is
+        # asked rather than second-guessed.
+        "state": _energy_band(_f(_map(energy).get(chart))),
+        "fields": fields,
+        "ladder": leg_ladder(rows, chart),
+    }
 
 
 def dashboard(read: Mapping[str, Any]) -> Dict[str, Any]:
@@ -1324,11 +1430,18 @@ def dashboard(read: Mapping[str, Any]) -> Dict[str, Any]:
         "agreement": summary.get("agreement", 0),
         "active": summary.get("active", 0),
         "groups": summary.get("groups") or {},
+        # ⚔️ CONFLICTED when the buckets disagree with each other. Not the same
+        # as low conviction: a read can be thin because little reported, or
+        # thin because structure and options are pulling opposite ways, and
+        # only the second is a conflict.
+        "conflicted": len({v for v in (summary.get("groups") or {}).values()
+                           if v in (BULL, BEAR)}) > 1,
         "heads": heads,
         "ladder": ladder(rows, spot),
         "pressure": pressure,
         "energy": energy,
-        "legs": [_leg_card(rows, "CALL"), _leg_card(rows, "PUT")],
+        "legs": [_leg_card(rows, "CALL", energy),
+                 _leg_card(rows, "PUT", energy)],
         "gate": _map(read.get("gate")),
     }
 

@@ -57,6 +57,13 @@ _NS = "mios-align"
 _BREAK = 700
 
 _CSS = f"""<style>
+/* ⚠️ border-box, on everything in the namespace.
+   Streamlit does not set it for us, and the default content-box makes every
+   percentage flex-basis a lie: `flex:1 1 46%` sizes the CONTENT to 46% and
+   then ADDS 22px of padding and 2px of border, so two 46% cards plus a
+   divider overflow by a pixel and wrap onto separate lines. The CE/PE battle
+   silently stacked on desktop for exactly this. */
+.{_NS}, .{_NS} * {{ box-sizing:border-box; }}
 .{_NS} {{
   background:{CARD_BG}; border:1px solid {CARD_BORDER};
   border-radius:10px; padding:12px 14px; margin-bottom:10px;
@@ -151,6 +158,39 @@ _CSS = f"""<style>
 .{_NS} .bar .vl {{ min-width:34px; text-align:right; font-weight:700;
                   font-variant-numeric:tabular-nums; }}
 
+/* the CE vs PE battle */
+.{_NS} .legs {{ display:flex; gap:8px; flex-wrap:wrap; align-items:flex-start; }}
+.{_NS} .leg {{
+  flex:1 1 46%; min-width:210px; padding:9px 11px;
+  border:1px solid {CARD_BORDER}; border-radius:9px;
+}}
+.{_NS} .leg h4 {{ margin:0 0 3px; font-size:12px; letter-spacing:.05em;
+                 font-weight:800; }}
+.{_NS} .leg .sub2 {{ font-size:10.5px; color:{FAINT}; margin-bottom:6px; }}
+.{_NS} .leg .ltp {{ font-size:24px; font-weight:800; color:{BRIGHT};
+                   line-height:1.1; }}
+.{_NS} .leg .st {{ font-size:12px; font-weight:700; margin:3px 0 7px; }}
+.{_NS} .lrung {{
+  display:flex; align-items:center; gap:7px; padding:2px 0; font-size:12px;
+  border-left:3px solid transparent; padding-left:6px;
+}}
+.{_NS} .lrung.is-ltp {{
+  background:rgba(255,255,255,.07); border-radius:5px;
+  border-left-color:{BRIGHT}; font-weight:800; font-size:14px;
+}}
+.{_NS} .lrung .px {{ min-width:60px; font-weight:700;
+                    font-variant-numeric:tabular-nums; }}
+.{_NS} .lrung .lb {{ flex:1 1 auto; color:{MUTED}; font-size:11px; }}
+.{_NS} .vs {{ align-self:center; font-size:20px; padding:0 2px; }}
+
+/* the spot → CE → PE chain */
+.{_NS} .chain {{ display:flex; flex-direction:column; gap:3px; }}
+.{_NS} .link {{ padding:6px 9px; border-radius:7px;
+               border:1px solid {CARD_BORDER}; font-size:13px; }}
+.{_NS} .link b {{ font-size:11px; color:{FAINT}; letter-spacing:.06em;
+                 display:block; }}
+.{_NS} .arrow {{ text-align:center; color:{FAINT}; font-size:13px; }}
+
 /* ── phone: one card per check ───────────────────────────────────── */
 @media (max-width:{_BREAK}px) {{
   .{_NS} {{ padding:10px; }}
@@ -192,6 +232,10 @@ _CSS = f"""<style>
   .{_NS} .rung {{ font-size:14px; }}
   .{_NS} .rung.is-spot {{ font-size:18px; }}
   .{_NS} .rung .lb {{ font-size:12.5px; }}
+  .{_NS} .leg {{ flex:1 1 100%; }}        /* the two legs stack, not squeeze */
+  .{_NS} .vs {{ align-self:center; }}
+  .{_NS} .lrung {{ font-size:13px; }}
+  .{_NS} .lrung.is-ltp {{ font-size:15px; }}
 }}
 </style>"""
 
@@ -343,6 +387,8 @@ def verdict_html(d: Mapping[str, Any]) -> str:
           f"{'⚠️ ' if conv == 'LOW' else ''}{conv} CONVICTION · "
           f"{d.get('agreement', 0)} of {d.get('active', 0)} active checks "
           f"({pct}%)</div>"
+        + (f"<div class='conv' style='color:{WARN}'>⚔️ CONFLICTED</div>"
+           if d.get("conflicted") else "")
         + f"<div class='sub' style='margin-top:5px'>"
           f"<span style='color:{C_BULL}'>🟢 {c.get('bull', 0)}</span> · "
           f"<span style='color:{C_BEAR}'>🔴 {c.get('bear', 0)}</span> · "
@@ -447,6 +493,110 @@ def energy_html(d: Mapping[str, Any]) -> str:
     return "<div class='hd'>⚡ PREMIUM ENERGY</div>" + "".join(bars) + tail
 
 
+#: energy band → the tone it is drawn in. The words are Stage 71.7's.
+_BAND_TONE = {"Explosive": C_BULL, "Strong": C_BULL, "Healthy": WARN,
+              "Weak": C_BEAR, "Dead": C_BEAR}
+_BAND_ICON = {"Explosive": "🔥", "Strong": "🔥", "Healthy": "⚡",
+              "Weak": "🪫", "Dead": "💀"}
+
+
+def legs_html(d: Mapping[str, Any]) -> str:
+    """The CE vs PE battle — each leg's premium, energy and its OWN price map.
+
+    This is the layer the first dashboard dropped, and dropping it was the
+    mistake: the index levels say where price is, and only the premiums say
+    whether the option market is confirming it. A call sitting under its own
+    high-volume pivot while the put sits on top of its own is the whole story
+    on a day the index looks fine.
+
+    Each leg gets its own ladder because a ₹107 premium and a 24,050 index
+    level share no axis — plotting them together would be meaningless.
+    """
+    legs = d.get("legs") or []
+    if not any(l.get("premium") for l in legs):
+        return ""
+    cards = []
+    for leg in legs:
+        chart = leg.get("chart") or ""
+        tint = C_BULL if chart == "CALL" else C_BEAR
+        band = leg.get("state")
+        rungs = "".join(
+            f"<div class='lrung{' is-ltp' if r.get('ltp') else ''}' "
+            f"style='border-left-color:{_COLOUR.get(r.get('align'), FAINT)}'>"
+            f"<span>{BALLS.get(r.get('align'), '⚪')}</span>"
+            f"<span class='px' style='color:"
+            f"{BRIGHT if r.get('ltp') else _COLOUR.get(r.get('align'), MUTED)}'>"
+            f"{r['price']:,.2f}</span>"
+            f"<span class='lb'>{_esc(' · '.join(r.get('labels') or []))}</span>"
+            "</div>"
+            for r in (leg.get("ladder") or []))
+        bits = []
+        if leg.get("energy") is not None:
+            bits.append(f"energy {leg['energy']:.0f}")
+        if leg.get("buy_pct") is not None:
+            bits.append(f"{leg['buy_pct']:.0f}% buy volume")
+        cards.append(
+            f"<div class='leg'>"
+            f"<h4 style='color:{tint}'>{'🟦' if chart == 'CALL' else '🟥'} "
+            f"{chart} SIDE</h4>"
+            f"<div class='sub2'>{_esc(leg.get('leg') or '')}</div>"
+            f"<div class='ltp'>{_esc(leg.get('premium'))}</div>"
+            + (f"<div class='st' style='color:{_BAND_TONE.get(band, FAINT)}'>"
+               f"{_BAND_ICON.get(band, '·')} PREMIUM {_esc(band).upper()}"
+               + (f" · {' · '.join(bits)}" if bits else "") + "</div>"
+               if band else
+               f"<div class='st' style='color:{FAINT}'>"
+               + (" · ".join(bits) or "energy not reported") + "</div>")
+            + rungs + "</div>")
+    return ("<div class='hd'>⚔️ CE vs PE — OPTION LTP BATTLE</div>"
+            f"<div class='legs'>{cards[0]}<div class='vs'>⚔️</div>{cards[1]}</div>"
+            if len(cards) == 2 else
+            "<div class='hd'>⚔️ OPTION LTP</div>"
+            f"<div class='legs'>{''.join(cards)}</div>")
+
+
+def chain_html(d: Mapping[str, Any]) -> str:
+    """Spot structure → option premium → dealers, as one chain.
+
+    The question this answers is the one three separate verdicts cannot:
+    **is the option market confirming what the index is doing?** "Structure
+    bullish, options bearish" states it; this shows it as a sequence, with the
+    legs' own premiums as the middle link.
+    """
+    groups = d.get("groups") or {}
+    legs = {l.get("chart"): l for l in (d.get("legs") or [])}
+    if not groups:
+        return ""
+
+    def _verd(name):
+        v = groups.get(name)
+        label = {BULL: "BULLISH", BEAR: "BEARISH",
+                 NEUTRAL: "MIXED", NA: "NOT REPORTING"}.get(v, "—")
+        return (f"<span style='color:{_COLOUR.get(v, FAINT)};font-weight:700'>"
+                f"{BALLS.get(v, '❓')} {label}</span>")
+
+    mid = []
+    for chart in ("CALL", "PUT"):
+        leg = legs.get(chart) or {}
+        band = leg.get("state")
+        if band:
+            mid.append(f"<span style='color:{_BAND_TONE.get(band, FAINT)}'>"
+                       f"{_BAND_ICON.get(band, '·')} {chart} {band.upper()}</span>")
+    e = d.get("energy") or {}
+    if e.get("winner"):
+        mid.append(f"<span style='color:{FAINT}'>energy "
+                   f"{e.get('CALL', 0):.0f} vs {e.get('PUT', 0):.0f}</span>")
+    return ("<div class='hd'>🔄 SPOT → OPTION PREMIUM → DEALERS</div>"
+            "<div class='chain'>"
+            f"<div class='link'><b>SPOT STRUCTURE</b>{_verd('STRUCTURE')}</div>"
+            "<div class='arrow'>↓</div>"
+            f"<div class='link'><b>OPTION PREMIUM</b>"
+            f"{' · '.join(mid) or _verd('OPTIONS')}</div>"
+            "<div class='arrow'>↓</div>"
+            f"<div class='link'><b>DEALERS</b>{_verd('DEALERS')}</div>"
+            "</div>")
+
+
 def conflict_html(d: Mapping[str, Any]) -> str:
     """Bullish defence against bearish pressure, side by side.
 
@@ -542,8 +692,10 @@ def render(st, read: Optional[Mapping[str, Any]], slot=None) -> None:
         body = (_CSS
                 + f"<div class='{_NS}'>" + head + verdict_html(d)
                 + heads_html(d) + ladder_html(d) + "</div>"
-                + f"<div class='{_NS}'>" + groups_html(d) + "</div>"
+                + f"<div class='{_NS}'>" + legs_html(d) + "</div>"
                 + f"<div class='{_NS}'>" + energy_html(d) + "</div>"
+                + f"<div class='{_NS}'>" + chain_html(d) + "</div>"
+                + f"<div class='{_NS}'>" + groups_html(d) + "</div>"
                 + f"<div class='{_NS}'>" + conflict_html(d) + "</div>"
                 + f"<div class='{_NS}'>" + gate_html(d) + "</div>")
         with target.container():

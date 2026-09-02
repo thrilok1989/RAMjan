@@ -16288,8 +16288,12 @@ def _render_main_analyzer():
     # staleness `_notify_poc_shifts` and `_notify_chart_formations` are placed
     # after the V6 render to avoid. The position moves; the order of
     # computation does not.
-    _alignment_container = st.container()
+    # 🥇 The Trade Card is FIRST. The order of the page is the order a trader
+    # asks the questions: what do I do → why → at which levels → what are the
+    # premiums doing → every check. Analysis above the decision makes the
+    # decision something you scroll to.
     _card_container = st.container()
+    _alignment_container = st.container()
     _picture_container = st.container()
     _v6_container = st.container()
     _v5_container = st.container()

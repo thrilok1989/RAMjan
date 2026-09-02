@@ -332,11 +332,12 @@ def test_build_survives_garbage_in_every_slot():
 
 # ── 6 · the wiring in the app ────────────────────────────────────────────────
 
-def test_the_panel_is_drawn_above_the_trade_card(source: str):
-    """Position: the checklist is the 'does everything agree?' read the card's
-    verdict rests on, so its container is claimed first."""
-    assert source.index("_alignment_container = st.container()") < \
-        source.index("_card_container = st.container()")
+def test_the_trade_card_is_drawn_first(source: str):
+    """The order of the page is the order a trader asks the questions: what do
+    I do → why → at which levels → what are the premiums doing → every check.
+    Analysis above the decision makes the decision something you scroll to."""
+    assert source.index("_card_container = st.container()") < \
+        source.index("_alignment_container = st.container()")
 
 
 def test_the_panel_is_filled_after_the_v6_render(source: str):
@@ -1367,3 +1368,135 @@ def test_the_detail_table_is_still_reachable():
     src = pathlib.Path(P.__file__).read_text()
     assert "Detailed alignment" in src
     assert "table_html(rows)" in src
+
+
+# ── 17 · the CE/PE battle ───────────────────────────────────────────────────
+#
+# The first dashboard dropped the leg LTP structure, and dropping it was the
+# mistake: the index levels say where price is, and only the premiums say
+# whether the option market is confirming it.
+
+def _legs_ss():
+    return {
+        "_nifty_spot_live": 24055.80,
+        "_market_picture": {"regime": "SIDEWAYS", "oi_floor": (24000, 9e4),
+                            "oi_ceiling": (24100, 1.1e5)},
+        "_reaction_sr": {"support": {"price": 24050.0},
+                         "resistance": {"price": 24109.0}},
+        "_atm_leg_ltp": {"ATM CE 24050": 107.30, "ATM PE 24050": 155.85},
+        "_atm_leg_vob_volume": {
+            "ATM CE 24050": [{"zone_type": "bullish", "mid": 108.98,
+                              "status": "FADING", "dominant": "balanced",
+                              "bull_pct": 42}],
+            "ATM PE 24050": [{"zone_type": "bullish", "mid": 141.98,
+                              "status": "BUILDING", "dominant": "buyers",
+                              "bull_pct": 76}]},
+        "_leg_profiles": {
+            "CALL": {"hv_points": [{"price": 115.85, "side": "HIGH"},
+                                   {"price": 107.00, "side": "LOW"}]},
+            "PUT": {"hv_points": [{"price": 156.15, "side": "HIGH"},
+                                  {"price": 140.10, "side": "LOW"}]},
+            "call_label": "ATM CE 24050", "put_label": "ATM PE 24050"},
+        "_premium_energy": {"bridge": {"energy_score": {"CALL": 30, "PUT": 56},
+                                       "preferred_premium": "Prefer PUT"}},
+    }
+
+
+@pytest.mark.parametrize("chart,nifty,expected", [
+    # a CALL reads straight: bullish for NIFTY means the call is strong
+    ("CALL", BB.BULL, A.STRONG),
+    ("CALL", BB.BEAR, A.WEAK),
+    # a PUT inverts, for the same reason bias_ball inverts on the way out
+    ("PUT", BB.BEAR, A.STRONG),
+    ("PUT", BB.BULL, A.WEAK),
+    ("PUT", BB.NEUTRAL, None),
+])
+def test_a_legs_own_strength_is_the_nifty_read_run_backwards(chart, nifty, expected):
+    """Showing "🔴 Bear" in a card headed PUT SIDE would have the trader reading
+    it as the put being weak, when a bearish PUT row means the opposite."""
+    assert A.leg_strength(chart, nifty) == expected
+
+
+def test_the_premium_band_comes_from_stage_71_7_not_from_here():
+    """The first attempt scored the card by a majority of its own level rows —
+    invented here — and read STRONG for a call whose energy was 30, because a
+    resistance far overhead outvoted the row that mattered."""
+    from mios_v5 import premium_energy as PE
+    for score in (10, 30, 56, 75, 95):
+        assert A._energy_band(score) == PE.energy_band(score)
+    legs = {l["chart"]: l for l in A.dashboard(A.build(_legs_ss()))["legs"]}
+    assert legs["CALL"]["state"] == "Weak"       # energy 30
+    assert legs["PUT"]["state"] == "Healthy"     # energy 56
+
+
+def test_each_leg_gets_its_own_ladder_on_its_own_axis():
+    """A ₹107 premium and a 24,050 index level share no axis."""
+    legs = {l["chart"]: l for l in A.dashboard(A.build(_legs_ss()))["legs"]}
+    for chart, ltp in (("CALL", 107.30), ("PUT", 155.85)):
+        rungs = legs[chart]["ladder"]
+        prices = [r["price"] for r in rungs]
+        assert prices == sorted(prices, reverse=True)
+        assert all(p < 1000 for p in prices), "an index level reached a leg map"
+        marks = [i for i, r in enumerate(rungs) if r["ltp"]]
+        assert len(marks) == 1
+        assert rungs[marks[0]]["price"] == ltp
+        assert all(r["price"] >= ltp for r in rungs[:marks[0]])
+
+
+def test_the_leg_ladder_and_the_row_name_the_same_prices():
+    """Built from the rows' own `levels`, so the map under a premium and the
+    text beside it cannot disagree."""
+    read = A.build(_legs_ss())
+    row = _by_check(read, "CALL HVP HIGH")
+    rungs = A.leg_ladder(read["rows"], "CALL")
+    for lv in row["levels"]:
+        assert any(abs(r["price"] - lv) < 0.001 for r in rungs), lv
+
+
+def test_the_battle_section_renders_both_sides():
+    from mios_v5.ui import alignment_panel as P
+    html = P.legs_html(A.dashboard(A.build(_legs_ss())))
+    assert "CALL SIDE" in html and "PUT SIDE" in html
+    assert "107.30" in html and "155.85" in html
+    assert "PREMIUM WEAK" in html and "PREMIUM HEALTHY" in html
+    assert "42% buy volume" in html and "76% buy volume" in html
+
+
+def test_the_chain_shows_spot_then_premium_then_dealers():
+    from mios_v5.ui import alignment_panel as P
+    html = P.chain_html(A.dashboard(A.build(_legs_ss())))
+    # the header names all three too — check the chain BODY for the order
+    body = html.split("<div class='chain'>", 1)[1]
+    assert body.index("SPOT STRUCTURE") < body.index("OPTION PREMIUM")
+    assert body.index("OPTION PREMIUM") < body.index("DEALERS")
+    # and the middle link carries the legs' own bands, not a bucket verdict
+    assert "CALL WEAK" in body and "PUT HEALTHY" in body
+
+
+def test_conflicted_is_not_the_same_as_low_conviction():
+    """A read can be thin because little reported, or thin because structure
+    and options pull opposite ways. Only the second is a conflict."""
+    d = A.dashboard(A.build(_ss()))
+    assert isinstance(d["conflicted"], bool)
+    # buckets all one way → not conflicted, whatever the conviction
+    agreed = A.dashboard({"rows": [], "summary": {"groups": {"STRUCTURE": BB.BEAR,
+                                                             "OPTIONS": BB.BEAR}}})
+    assert agreed["conflicted"] is False
+    split = A.dashboard({"rows": [], "summary": {"groups": {"STRUCTURE": BB.BULL,
+                                                            "OPTIONS": BB.BEAR}}})
+    assert split["conflicted"] is True
+
+
+def test_every_percentage_flex_basis_is_measured_border_box():
+    """Streamlit does not set `box-sizing` for us, and the default content-box
+    makes a percentage flex-basis a lie: `flex:1 1 46%` sizes the CONTENT to
+    46% and then ADDS the padding and border, so two 46% cards plus a divider
+    overflow by a pixel and wrap. The CE/PE battle silently stacked on desktop
+    for exactly this — nothing in the markup or the computed flex values showed
+    it, only the rendered geometry."""
+    P = _panel()
+    assert "box-sizing:border-box" in P._CSS
+    # it has to cover the CHILDREN too — every card that sets a % basis also
+    # sets padding on itself
+    rule = next(l for l in P._CSS.splitlines() if "box-sizing" in l)
+    assert f".{P._NS} *" in rule, "the reset must reach the flex items"

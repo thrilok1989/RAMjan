@@ -1361,6 +1361,18 @@ def test_the_dashboard_survives_an_empty_market():
     assert d["pressure"][BB.BULL] == [] and d["pressure"][BB.BEAR] == []
 
 
+def test_the_gate_leads_the_panel():
+    """It is the decision; everything under it is the reasoning. Same rule that
+    put the Trade Card above this panel — an answer you have to scroll to is an
+    answer arriving late."""
+    import inspect
+    from mios_v5.ui import alignment_panel as P
+    body = inspect.getsource(P.render)
+    for later in ("verdict_html(d)", "ladder_html(d)", "legs_html(d)",
+                  "conflict_html(d)"):
+        assert body.index("gate_html(d)") < body.index(later), later
+
+
 def test_the_detail_table_is_still_reachable():
     """The dashboard is the scan; the table is the audit. A summary you cannot
     check is a summary you have to trust."""

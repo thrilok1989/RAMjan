@@ -98,6 +98,9 @@ _CSS = f"""<style>
   border:1px solid {CARD_BORDER}; border-radius:7px; font-size:12px;
 }}
 .{_NS} .net {{ font-size:17px; font-weight:800; margin:8px 0 3px; }}
+/* the gate leads the panel, so it is sized as the headline it now is */
+.{_NS} .gate {{ font-size:28px; font-weight:800; line-height:1.15;
+               margin:2px 0 4px; }}
 .{_NS} .sub {{ font-size:12px; color:{FAINT}; margin-bottom:8px; }}
 .{_NS} .why {{ font-size:13px; color:{MUTED}; margin-bottom:5px; }}
 .{_NS} .why b {{ color:{BRIGHT}; }}
@@ -227,6 +230,7 @@ _CSS = f"""<style>
   .{_NS} .chip {{ font-size:12.5px; padding:5px 10px; }}
   .{_NS} .why, .{_NS} .conflict {{ font-size:13.5px; }}
   .{_NS} .verdict .big {{ font-size:26px; }}
+  .{_NS} .gate {{ font-size:25px; }}
   .{_NS} .head {{ flex:1 1 45%; }}          /* two per line, not four squeezed */
   .{_NS} .col {{ flex:1 1 100%; }}          /* the three columns stack */
   .{_NS} .rung {{ font-size:14px; }}
@@ -656,8 +660,8 @@ def gate_html(d: Mapping[str, Any]) -> str:
     if isinstance(g.get("rr"), (int, float)):
         bits.append(f"R:R {g['rr']:.1f}")
     why = "; ".join(str(w) for w in (g.get("why") or [])[:2])
-    return ("<div class='hd'>🎯 ENTRY GATE</div>"
-            f"<div class='net' style='color:{tone}'>{icon} {_esc(word)}</div>"
+    return ("<div class='hd'>🎯 ENTRY GATE — CURRENT ACTION</div>"
+            f"<div class='gate' style='color:{tone}'>{icon} {_esc(word)}</div>"
             + (f"<div class='sub'>{_esc(' · '.join(bits))}</div>" if bits else "")
             + (f"<div class='why'>{_esc(why)}</div>" if why else "")
             + f"<div class='sub' style='color:{FAINT}'>the app's own gate — "
@@ -689,15 +693,18 @@ def render(st, read: Optional[Mapping[str, Any]], slot=None) -> None:
         from ..alignment import dashboard as _dash
         d = _dash(read or {})
         head = "<div class='hd'>🧭 MIOS ALIGNMENT DASHBOARD</div>"
+        # 🥇 The gate is FIRST. It is the decision; everything under it is the
+        # reasoning. Same rule that put the Trade Card above this panel — an
+        # answer you have to scroll to is an answer arriving late.
         body = (_CSS
-                + f"<div class='{_NS}'>" + head + verdict_html(d)
+                + f"<div class='{_NS}'>" + head + gate_html(d) + "</div>"
+                + f"<div class='{_NS}'>" + verdict_html(d)
                 + heads_html(d) + ladder_html(d) + "</div>"
                 + f"<div class='{_NS}'>" + legs_html(d) + "</div>"
                 + f"<div class='{_NS}'>" + energy_html(d) + "</div>"
                 + f"<div class='{_NS}'>" + chain_html(d) + "</div>"
                 + f"<div class='{_NS}'>" + groups_html(d) + "</div>"
-                + f"<div class='{_NS}'>" + conflict_html(d) + "</div>"
-                + f"<div class='{_NS}'>" + gate_html(d) + "</div>")
+                + f"<div class='{_NS}'>" + conflict_html(d) + "</div>")
         with target.container():
             st.markdown(body, unsafe_allow_html=True)
             # The audit trail, collapsed. Same rows, same numbers — this is
